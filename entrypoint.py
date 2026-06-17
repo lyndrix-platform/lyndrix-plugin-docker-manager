@@ -39,14 +39,14 @@ from .app.ui.widget import render_dashboard_widget as _render_widget
 manifest = ModuleManifest(
     id="lyndrix.plugin.docker",
     name="Docker Manager",
-    version="0.0.3",
+    version="0.0.4",
     description="Docker proxy monitoring with runtime controls (start/stop/restart/logs/shell).",
     author="Lyndrix",
     icon="view_in_ar",
     type="PLUGIN",
     min_core_version="0.1.1",
     auto_enable_on_install=False,
-    repo_url="https://github.com/lyndrix-dev/lyndrix-docker-manager",
+    repo_url="https://github.com/lyndrix-platform/lyndrix-plugin-docker-manager",
     ui_route="/docker",
     permissions={
         "subscribe": [
