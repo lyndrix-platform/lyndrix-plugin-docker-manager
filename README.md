@@ -1,57 +1,48 @@
-# Lyndrix Meeting Bingo Plugin
+# Lyndrix Docker Manager
 
-**Version:** 1.2.0  
-**Autor:** Lyndrix
+**Plugin ID:** `lyndrix.plugin.docker` · **Route:** `/docker`
 
-Ein Multiplayer Bullshit-Bingo Plugin, das nahtlos in die Lyndrix-Plattform integriert ist. Perfekt, um langatmige Meetings mit etwas Gamification aufzulockern.
+A [Lyndrix](https://github.com/lyndrix-platform/lyndrix-core) plugin for monitoring and
+controlling Docker hosts from the dashboard. It talks to the Docker daemon through the
+Lyndrix Core **sockets** layer (no direct socket access from the plugin), so all access is
+mediated by core auth/permissions.
 
-## 📋 Features
+## Features
 
-- **Multiplayer Lobby**: Erstelle Bingo-Sessions mit anpassbarer Feldgröße (3x3 bis 5x5).
-- **Echtzeit-Synchronisation**: Sieh live, wie deine Kollegen ihre Felder markieren (und wer kurz vor dem Sieg steht).
-- **Wall of Shame**: Ein optionales Scoreboard, das die Gewinner persistent im Lyndrix Vault speichert.
-- **Sarkastische Kommentare**: Das System kommentiert deine Leistung (oder deren Fehlen).
-- **Integrierte Begriffe**: Kommt mit einer kuratierten Liste an Buzzwords (`terms.txt`), die pro Session angepasst werden kann.
+- **Container monitoring** — live view of containers and their state across managed hosts.
+- **Runtime controls** — start / stop / restart, view **logs**, and open an interactive **shell**.
+- **Host management** — register Docker hosts; connection details persisted in the plugin's
+  Vault namespace.
+- **Dashboard widget + settings UI** — a compact status widget and a settings page.
+- **REST API** — container operations exposed under `/api/plugins/lyndrix.plugin.docker/`.
 
-## 🚀 Installation
+## Installation
 
-Da es sich um ein Plugin für `lyndrix-core` handelt, muss es im Plugin-Verzeichnis der Hauptanwendung installiert werden.
+Install **Docker Manager** from the Lyndrix **Plugin Manager**, or declare it for
+reconciliation on boot via `LYNDRIX_PLUGINS_DESIRED`:
 
-1. Navigiere in das Plugin-Verzeichnis deiner `lyndrix-core` Installation:
-   ```bash
-   cd /pfad/zu/lyndrix-core/plugins
-   ```
+```text
+https://github.com/lyndrix-platform/lyndrix-plugin-docker-manager
+```
 
-2. Klone dieses Repository:
-   ```bash
-   git clone https://github.com/lyndrix/lyndrix-meeting-bingo.git lyndrix.plugin.bingo
-   ```
-   *Hinweis: Der Zielordnername `lyndrix.plugin.bingo` wird empfohlen, damit die ID im Manifest sauber matcht.*
+The manifest sets `auto_enable_on_install=False` — enable it in the Plugin Manager after
+configuring your Docker host(s).
 
-3. Starte die Lyndrix-Anwendung neu. Das Plugin wird automatisch geladen und ist unter der Route `/bingo` erreichbar.
+## Project structure
 
-## ⚙️ Konfiguration
+```
+entrypoint.py        # manifest + lifecycle wiring only
+app/model/           # data structures / persistence helpers
+app/controller/      # service singleton, Docker operations, event handlers
+app/ui/              # NiceGUI pages, widget, settings
+```
 
-Das Plugin nutzt die interne `ctx` API von Lyndrix für Einstellungen und Secrets.
+## Documentation
 
-### Scoreboard (Wall of Shame)
-Standardmäßig ist das dauerhafte Speichern von Gewinnern deaktiviert (aus "ethischen" Gründen).
-Um es zu aktivieren:
-1. Öffne das Plugin in der UI.
-2. Scrolle zu den Einstellungen.
-3. Aktiviere den Switch **"Scoreboard aktivieren"**.
-4. Die Daten werden sicher im Vault unter dem Key `bingo_scoreboard` abgelegt.
+- Plugin docs: https://docker-manager.docs.lyndrix.eu
+- Platform docs: https://docs.lyndrix.eu — see [Sockets](https://docs.lyndrix.eu/core-components/sockets/)
+  and the [Plugin Development Guide](https://docs.lyndrix.eu/plugins/).
 
-## 🛠 Entwicklung & Struktur
+## License
 
-- `__init__.py`: Enthält die komplette Logik, UI (NiceGUI) und das Plugin-Manifest.
-- `terms.txt`: Standardliste der Buzzwords (wird neu erstellt, falls gelöscht).
-
-### Abhängigkeiten
-Das Plugin verlässt sich auf Bibliotheken, die in `lyndrix-core` bereitgestellt werden:
-- `nicegui`
-- `core.modules.models`
-- `ui.layout` / `ui.theme`
-
-## 📝 Lizenz
-Internes Tool. Nutzung auf eigene Gefahr während offizieller Meetings.
+Apache-2.0 — see [LICENSE](LICENSE).
