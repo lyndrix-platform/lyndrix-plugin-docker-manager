@@ -51,7 +51,9 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
         identity: ApiIdentity = Depends(require_permission("api:write")),
     ):
         try:
-            host = service.upsert_host(payload.model_dump())
+            # Drop a null id so the service treats this as a create (it requires
+            # id to be absent, not None, for new hosts).
+            host = service.upsert_host(payload.model_dump(exclude_none=True))
             return {"host": host, "hosts": service.list_hosts()}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
