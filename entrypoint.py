@@ -27,7 +27,7 @@ except ImportError:
             return fn
         return _decorator
 
-from .app.api import build_router, register_api_routes
+from .app.api import build_plugin_router
 from .app.controller.service import docker_manager_service as svc
 from .app.ui.overview import render_overview_ui
 from .app.ui.settings import render_settings_ui as _render_settings_ui
@@ -48,6 +48,22 @@ manifest = ModuleManifest(
     auto_enable_on_install=False,
     repo_url="https://github.com/lyndrix-platform/lyndrix-plugin-docker-manager",
     ui_route="/docker",
+    react_ui=True,
+    react_routes=[
+        {
+            "path": "/docker",
+            "label": "Docker Manager",
+            "icon": "view_in_ar",
+            "sidebar_visible": True,
+        },
+        {
+            "path": "/docker/settings",
+            "label": "Docker Manager Einstellungen",
+            "icon": "settings",
+            "sidebar_visible": False,
+        },
+    ],
+    settings_ui_route="/docker/settings",
     permissions={
         "subscribe": [
             "vault:ready_for_data",
@@ -82,9 +98,10 @@ def setup(ctx):
     ctx.log.info("Docker Manager: setup started")
     svc.set_context(ctx)
 
-    # Register REST API routes before NiceGUI's catch-all root mount.
-    from main import app as fastapi_app
-    register_api_routes(fastapi_app, build_router(svc))
+    # Single auth'd router, mounted via the registry at
+    # /api/plugins/lyndrix.plugin.docker/ (registry enforces authentication;
+    # routes add api:read / api:write for authorization).
+    ctx.register_routes(build_plugin_router(svc))
 
     @ctx.subscribe("vault:ready_for_data")
     async def _on_vault_ready(payload=None):
@@ -138,10 +155,5 @@ def setup(ctx):
     @main_layout("Docker Manager")
     async def docker_page():
         render_overview_ui(ctx, svc)
-
-    @ui.page("/docker/settings")
-    @main_layout("Docker Manager Settings")
-    async def docker_settings_page():
-        _render_settings_ui(ctx, svc)
 
     ctx.log.info("Docker Manager: setup complete")

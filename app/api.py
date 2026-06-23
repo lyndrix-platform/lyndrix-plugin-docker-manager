@@ -1,10 +1,19 @@
-"""REST API for Docker Manager."""
+"""REST API for Docker Manager.
+
+A single router is mounted by core under ``/api/plugins/lyndrix.plugin.docker/``
+via ``ctx.register_routes()``. The registry enforces authentication for every
+route automatically; we additionally require ``api:read`` on reads and
+``api:write`` on mutations so a merely-authenticated user cannot start/stop
+containers or edit hosts without the write permission.
+"""
 from __future__ import annotations
 
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+from core.api import ApiIdentity, require_permission
 
 from .controller.service import DockerManagerService
 
@@ -27,15 +36,20 @@ class ContainerActionPayload(BaseModel):
     action: Literal["start", "stop", "restart"]
 
 
-def build_router(service: DockerManagerService) -> APIRouter:
-    router = APIRouter(prefix="/api/docker-manager", tags=["Docker Manager"])
+def build_plugin_router(service: DockerManagerService) -> APIRouter:
+    """The single Docker Manager router — core mounts it at /api/plugins/<id>/."""
+    router = APIRouter(tags=["Docker Manager"])
 
+    # ── Hosts ────────────────────────────────────────────────────────────────
     @router.get("/hosts")
-    async def list_hosts():
+    async def list_hosts(identity: ApiIdentity = Depends(require_permission("api:read"))):
         return {"hosts": service.list_hosts()}
 
     @router.post("/hosts")
-    async def upsert_host(payload: DockerHostPayload):
+    async def upsert_host(
+        payload: DockerHostPayload,
+        identity: ApiIdentity = Depends(require_permission("api:write")),
+    ):
         try:
             host = service.upsert_host(payload.model_dump())
             return {"host": host, "hosts": service.list_hosts()}
@@ -43,7 +57,10 @@ def build_router(service: DockerManagerService) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/hosts/set")
-    async def set_hosts(payload: DockerHostsSetPayload):
+    async def set_hosts(
+        payload: DockerHostsSetPayload,
+        identity: ApiIdentity = Depends(require_permission("api:write")),
+    ):
         try:
             hosts = service.replace_hosts([h.model_dump() for h in payload.hosts])
             return {"hosts": hosts}
@@ -51,17 +68,27 @@ def build_router(service: DockerManagerService) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.delete("/hosts/{host_id}")
-    async def delete_host(host_id: int):
+    async def delete_host(
+        host_id: int,
+        identity: ApiIdentity = Depends(require_permission("api:write")),
+    ):
         if not service.delete_host(host_id):
             raise HTTPException(status_code=404, detail=f"Unknown host id: {host_id}")
         return {"ok": True, "hosts": service.list_hosts()}
 
+    # ── Containers ───────────────────────────────────────────────────────────
     @router.get("/containers")
-    async def list_containers(include_stopped: bool = True):
+    async def list_containers(
+        include_stopped: bool = True,
+        identity: ApiIdentity = Depends(require_permission("api:read")),
+    ):
         return service.fetch_all_containers_parallel(include_stopped=include_stopped)
 
     @router.post("/containers/action")
-    async def container_action(payload: ContainerActionPayload):
+    async def container_action(
+        payload: ContainerActionPayload,
+        identity: ApiIdentity = Depends(require_permission("api:write")),
+    ):
         try:
             return service.container_action(payload.host_id, payload.container_id, payload.action)
         except ValueError as exc:
@@ -70,7 +97,12 @@ def build_router(service: DockerManagerService) -> APIRouter:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @router.get("/containers/{host_id}/{container_id}/logs")
-    async def container_logs(host_id: int, container_id: str, tail: int = 200):
+    async def container_logs(
+        host_id: int,
+        container_id: str,
+        tail: int = 200,
+        identity: ApiIdentity = Depends(require_permission("api:read")),
+    ):
         try:
             return {
                 "host_id": host_id,
@@ -84,7 +116,11 @@ def build_router(service: DockerManagerService) -> APIRouter:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @router.post("/containers/{host_id}/{container_id}/shell")
-    async def container_shell(host_id: int, container_id: str):
+    async def container_shell(
+        host_id: int,
+        container_id: str,
+        identity: ApiIdentity = Depends(require_permission("api:write")),
+    ):
         try:
             return {
                 "host_id": host_id,
@@ -97,25 +133,3 @@ def build_router(service: DockerManagerService) -> APIRouter:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return router
-
-
-def register_api_routes(fastapi_app, router: APIRouter) -> None:
-    api_prefix = "/api/docker-manager"
-    routes = list(fastapi_app.router.routes)
-    existing = [r for r in routes if getattr(r, "path", "").startswith(api_prefix)]
-
-    if not existing:
-        fastapi_app.include_router(router)
-        routes = list(fastapi_app.router.routes)
-        existing = [r for r in routes if getattr(r, "path", "").startswith(api_prefix)]
-
-    if not existing:
-        return
-
-    remaining = [r for r in routes if r not in existing]
-    root_idx = next(
-        (i for i, r in enumerate(remaining) if getattr(r, "path", None) == ""),
-        len(remaining),
-    )
-    fastapi_app.router.routes = remaining[:root_idx] + existing + remaining[root_idx:]
-    fastapi_app.openapi_schema = None
