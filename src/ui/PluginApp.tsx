@@ -35,6 +35,16 @@ function stateColor(state: string | null): string {
   }
 }
 
+function stateBadgeClass(state: string | null): string {
+  switch ((state ?? '').toLowerCase()) {
+    case 'running': return 'lx-badge--up'
+    case 'exited':
+    case 'dead':   return 'lx-badge--down'
+    case 'paused': return 'lx-badge--paused'
+    default:       return 'lx-badge--muted'
+  }
+}
+
 function stateLabel(state: string | null): string {
   if (!state) return 'Unbekannt'
   return state.charAt(0).toUpperCase() + state.slice(1)
@@ -42,65 +52,16 @@ function stateLabel(state: string | null): string {
 
 // ─── Shared sub-components ────────────────────────────────────────────────────
 
-function StateBadge({ state }: { state: string | null }) {
-  const color = stateColor(state)
-  return (
-    <span style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 4,
-      fontSize: '0.7rem',
-      fontWeight: 600,
-      color,
-      background: `color-mix(in srgb, ${color} 12%, transparent)`,
-      border: `1px solid color-mix(in srgb, ${color} 30%, transparent)`,
-      borderRadius: 'var(--lx-radius-sm)',
-      padding: '2px 7px',
-      letterSpacing: '0.04em',
-      textTransform: 'uppercase',
-    }}>
-      <span style={{ width: 5, height: 5, borderRadius: '50%', background: color, flexShrink: 0 }} />
-      {stateLabel(state)}
-    </span>
-  )
+function MatIcon({ name, size = 18 }: { name: string; size?: number }) {
+  return <span className="material-icons" style={{ fontSize: size }}>{name}</span>
 }
 
-function ActionButton({
-  label,
-  onClick,
-  disabled,
-  variant = 'default',
-}: {
-  label: string
-  onClick: () => void
-  disabled?: boolean
-  variant?: 'default' | 'danger' | 'primary'
-}) {
-  const accent =
-    variant === 'danger' ? 'var(--lx-state-down)'
-    : variant === 'primary' ? 'var(--lx-accent)'
-    : 'var(--lx-accent)'
+function StateBadge({ state }: { state: string | null }) {
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        padding: '3px 10px',
-        fontSize: '0.7rem',
-        fontWeight: 600,
-        border: `1px solid color-mix(in srgb, ${accent} 40%, transparent)`,
-        borderRadius: 'var(--lx-radius-sm)',
-        background: variant === 'primary'
-          ? `color-mix(in srgb, ${accent} 20%, transparent)`
-          : `color-mix(in srgb, ${accent} 10%, transparent)`,
-        color: disabled ? 'var(--lx-text-muted)' : accent,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        transition: 'opacity 0.15s',
-      }}
-    >
-      {label}
-    </button>
+    <span className={`lx-badge ${stateBadgeClass(state)}`}>
+      <span className="lx-dot" />
+      {stateLabel(state)}
+    </span>
   )
 }
 
@@ -128,50 +89,43 @@ function ContainerRow({
   }
 
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.75rem',
-      padding: '0.5rem 0.75rem',
-      borderBottom: '1px solid var(--lx-border-soft)',
-    }}>
-      <div style={{
-        width: 3,
-        height: 32,
-        borderRadius: 2,
-        background: stateColor(container.state),
-        flexShrink: 0,
-      }} />
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '12px 16px',
+        borderBottom: '1px solid var(--lx-border-soft)',
+        transition: 'background 0.12s ease',
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background =
+        'color-mix(in srgb, var(--lx-elevated) 55%, transparent)')}
+      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+    >
+      <span style={{ width: 3, height: 34, borderRadius: 2, background: stateColor(container.state), flexShrink: 0 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{
-          fontSize: '0.8rem',
-          fontWeight: 600,
-          color: 'var(--lx-text)',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
+        <div style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--lx-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {container.name}
         </div>
-        <div style={{
-          fontSize: '0.65rem',
-          color: 'var(--lx-text-muted)',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
+        <div className="lx-mono" style={{ fontSize: '0.6875rem', color: 'var(--lx-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 2 }}>
           {container.image ?? '—'} · {container.id}
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
         <StateBadge state={container.state} />
         {isRunning ? (
           <>
-            <ActionButton label="Restart" disabled={busy} onClick={() => void act('restart')} />
-            <ActionButton label="Stop" disabled={busy} onClick={() => void act('stop')} variant="danger" />
+            <button className="lx-btn lx-btn--secondary lx-btn--sm" disabled={busy} onClick={() => void act('restart')}>
+              <MatIcon name="restart_alt" size={15} />Restart
+            </button>
+            <button className="lx-btn lx-btn--danger lx-btn--sm" disabled={busy} onClick={() => void act('stop')}>
+              <MatIcon name="stop" size={15} />Stop
+            </button>
           </>
         ) : (
-          <ActionButton label="Start" disabled={busy} onClick={() => void act('start')} />
+          <button className="lx-btn lx-btn--primary lx-btn--sm" disabled={busy} onClick={() => void act('start')}>
+            <MatIcon name="play_arrow" size={15} />Start
+          </button>
         )}
       </div>
     </div>
@@ -191,49 +145,41 @@ function HostCard({
   const runningCount = containers.filter((c) => (c.state ?? '').toLowerCase() === 'running').length
 
   return (
-    <div style={{
-      background: 'var(--lx-surface)',
-      border: '1px solid var(--lx-border-soft)',
-      borderRadius: 'var(--lx-radius-md)',
-      marginBottom: '1rem',
-      overflow: 'hidden',
-    }}>
+    <div className="lx-card" style={{ marginBottom: 16, overflow: 'hidden' }}>
       <div style={{
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        padding: '0.75rem 1rem',
+        padding: '14px 16px',
         borderBottom: '1px solid var(--lx-border-soft)',
-        background: 'var(--lx-elevated)',
       }}>
-        <div>
-          <span style={{ fontSize: '0.875rem', fontWeight: 700, color: 'var(--lx-text)' }}>
-            {host.name}
-          </span>
-          <span style={{ fontSize: '0.7rem', color: 'var(--lx-text-muted)', marginLeft: 8 }}>
-            {host.scheme}://{host.ip}:{host.port}
-          </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }}>
+          <div style={{
+            width: 36, height: 36, borderRadius: 'var(--lx-radius-sm)', flexShrink: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'color-mix(in srgb, var(--lx-accent) 12%, transparent)', color: 'var(--lx-accent)',
+          }}>
+            <MatIcon name="dns" size={20} />
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--lx-text)' }}>{host.name}</div>
+            <div className="lx-mono" style={{ fontSize: '0.6875rem', color: 'var(--lx-text-muted)', marginTop: 2 }}>
+              {host.scheme}://{host.ip}:{host.port}
+            </div>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          {!error && (
-            <span style={{ fontSize: '0.7rem', color: 'var(--lx-text-muted)' }}>
-              {runningCount}/{containers.length} aktiv
-            </span>
-          )}
-          {error && (
-            <span style={{ fontSize: '0.7rem', color: 'var(--lx-state-down)' }}>
-              Verbindungsfehler
-            </span>
-          )}
-        </div>
+        {error ? (
+          <span className="lx-badge lx-badge--down"><span className="lx-dot" />Verbindungsfehler</span>
+        ) : (
+          <span className="lx-badge lx-badge--muted">{runningCount}/{containers.length} aktiv</span>
+        )}
       </div>
+
       {error && (
-        <div style={{ padding: '0.75rem 1rem', fontSize: '0.75rem', color: 'var(--lx-state-down)' }}>
-          {error}
-        </div>
+        <div style={{ padding: '14px 16px', fontSize: '0.8125rem', color: 'var(--lx-state-down)' }}>{error}</div>
       )}
       {!error && containers.length === 0 && (
-        <div style={{ padding: '0.75rem 1rem', fontSize: '0.75rem', color: 'var(--lx-text-muted)' }}>
+        <div style={{ padding: '20px 16px', fontSize: '0.8125rem', color: 'var(--lx-text-muted)', textAlign: 'center' }}>
           Keine Container gefunden.
         </div>
       )}
@@ -283,27 +229,23 @@ function ContainerView() {
   }
 
   const entries = data ? Object.values(data) : []
+  const totalContainers = entries.reduce((n, e) => n + e.containers.length, 0)
+  const totalRunning = entries.reduce(
+    (n, e) => n + e.containers.filter((c) => (c.state ?? '').toLowerCase() === 'running').length, 0)
 
   return (
-    <div style={{ maxWidth: 900, margin: '0 auto', padding: '1.5rem 1.5rem 3rem' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
-        <h1 style={{ margin: 0, fontSize: '1.125rem', fontWeight: 700, color: 'var(--lx-text)' }}>
-          Docker Manager
-        </h1>
-        <button
-          onClick={() => void fetchContainers()}
-          disabled={loading}
-          style={{
-            padding: '0.375rem 0.75rem',
-            borderRadius: 'var(--lx-radius-sm)',
-            border: '1px solid var(--lx-border-soft)',
-            background: 'var(--lx-surface)',
-            color: loading ? 'var(--lx-text-muted)' : 'var(--lx-text)',
-            fontSize: '0.75rem',
-            cursor: loading ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {loading ? 'Lade…' : 'Aktualisieren'}
+    <div style={{ maxWidth: 900, margin: '0 auto', padding: '32px 24px 48px' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 24, gap: 16 }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--lx-text)' }}>
+            Docker Manager
+          </h1>
+          <p style={{ margin: '6px 0 0', fontSize: '0.8125rem', color: 'var(--lx-text-muted)' }}>
+            {entries.length} Host{entries.length !== 1 ? 's' : ''} · {totalRunning}/{totalContainers} Container aktiv
+          </p>
+        </div>
+        <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={() => void fetchContainers()} disabled={loading}>
+          <MatIcon name="refresh" size={15} />{loading ? 'Lade…' : 'Aktualisieren'}
         </button>
       </div>
 
@@ -311,22 +253,15 @@ function ContainerView() {
       {actionError && <ErrorBox msg={actionError} />}
 
       {loading && !data && (
-        <div style={{ color: 'var(--lx-text-muted)', fontSize: '0.875rem', textAlign: 'center', padding: '3rem 0' }}>
-          Lade Container…
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '48px 0' }}>
+          <div className="lx-spinner" />
         </div>
       )}
 
       {!loading && data && entries.length === 0 && (
-        <div style={{
-          padding: '2rem',
-          textAlign: 'center',
-          color: 'var(--lx-text-muted)',
-          fontSize: '0.875rem',
-          background: 'var(--lx-surface)',
-          border: '1px solid var(--lx-border-soft)',
-          borderRadius: 'var(--lx-radius-md)',
-        }}>
-          Keine Docker-Hosts konfiguriert.
+        <div className="lx-card lx-empty">
+          <MatIcon name="dns" size={34} />
+          <p style={{ margin: 0, fontSize: '0.875rem' }}>Keine Docker-Hosts konfiguriert.</p>
         </div>
       )}
 
@@ -349,31 +284,29 @@ const EMPTY_FORM = { name: '', ip: '', port: 2375, scheme: 'http' }
 function ErrorBox({ msg }: { msg: string }) {
   return (
     <div style={{
-      padding: '0.75rem 1rem',
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '12px 16px',
       borderRadius: 'var(--lx-radius-md)',
-      background: `color-mix(in srgb, var(--lx-state-down) 10%, transparent)`,
-      border: `1px solid color-mix(in srgb, var(--lx-state-down) 25%, transparent)`,
+      background: 'color-mix(in srgb, var(--lx-state-down) 10%, transparent)',
+      border: '1px solid color-mix(in srgb, var(--lx-state-down) 25%, transparent)',
       color: 'var(--lx-state-down)',
-      fontSize: '0.8rem',
-      marginBottom: '1rem',
+      fontSize: '0.8125rem',
+      marginBottom: 16,
     }}>
-      {msg}
+      <MatIcon name="error_outline" size={17} />{msg}
     </div>
   )
 }
 
-function inputStyle(wider = false): React.CSSProperties {
-  return {
-    width: wider ? '100%' : undefined,
-    padding: '0.35rem 0.6rem',
-    fontSize: '0.8rem',
-    borderRadius: 'var(--lx-radius-sm)',
-    border: '1px solid var(--lx-border-soft)',
-    background: 'var(--lx-elevated)',
-    color: 'var(--lx-text)',
-    outline: 'none',
-    boxSizing: 'border-box',
-  }
+function CardHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="lx-section-title" style={{
+      padding: '14px 16px',
+      borderBottom: '1px solid var(--lx-border-soft)',
+    }}>
+      {children}
+    </div>
+  )
 }
 
 function SettingsView() {
@@ -418,9 +351,7 @@ function SettingsView() {
     setError(null)
     setNotice(null)
     try {
-      const payload = editId !== null
-        ? { ...form, id: editId }
-        : form
+      const payload = editId !== null ? { ...form, id: editId } : form
       const res = await dockerManagerApi.upsertHost(payload)
       setHosts(res.hosts)
       cancelEdit()
@@ -451,188 +382,161 @@ function SettingsView() {
   const isEditing = editId !== null
 
   return (
-    <div style={{ maxWidth: 860, margin: '0 auto', padding: '1.5rem 1.5rem 3rem' }}>
+    <div style={{ maxWidth: 860, margin: '0 auto', padding: '32px 24px 48px' }}>
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.5rem' }}>
-        <a
-          href="#"
-          onClick={(e) => { e.preventDefault(); window.history.back() }}
-          style={{ fontSize: '0.75rem', color: 'var(--lx-text-muted)', textDecoration: 'none' }}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+        <button
+          className="lx-icon-btn"
+          onClick={() => window.history.back()}
+          title="Zurück"
         >
-          ← Zurück
-        </a>
-        <h1 style={{ margin: 0, fontSize: '1.125rem', fontWeight: 700, color: 'var(--lx-text)' }}>
-          Docker Manager — Einstellungen
-        </h1>
+          <MatIcon name="arrow_back" size={18} />
+        </button>
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--lx-text)' }}>
+            Docker Manager
+          </h1>
+          <p style={{ margin: '4px 0 0', fontSize: '0.8125rem', color: 'var(--lx-text-muted)' }}>
+            Einstellungen · Docker-Hosts verwalten
+          </p>
+        </div>
       </div>
 
       {error && <ErrorBox msg={error} />}
       {notice && (
         <div style={{
-          padding: '0.6rem 1rem',
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '12px 16px',
           borderRadius: 'var(--lx-radius-md)',
-          background: `color-mix(in srgb, var(--lx-state-up) 10%, transparent)`,
-          border: `1px solid color-mix(in srgb, var(--lx-state-up) 25%, transparent)`,
+          background: 'color-mix(in srgb, var(--lx-state-up) 10%, transparent)',
+          border: '1px solid color-mix(in srgb, var(--lx-state-up) 25%, transparent)',
           color: 'var(--lx-state-up)',
-          fontSize: '0.8rem',
-          marginBottom: '1rem',
+          fontSize: '0.8125rem',
+          marginBottom: 16,
         }}>
-          {notice}
+          <MatIcon name="check_circle" size={17} />{notice}
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: '1.25rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
 
         {/* Host list */}
-        <div style={{
-          flex: '1 1 380px',
-          background: 'var(--lx-surface)',
-          border: '1px solid var(--lx-border-soft)',
-          borderRadius: 'var(--lx-radius-md)',
-          overflow: 'hidden',
-        }}>
-          <div style={{
-            padding: '0.75rem 1rem',
-            borderBottom: '1px solid var(--lx-border-soft)',
-            background: 'var(--lx-elevated)',
-            fontSize: '0.8rem',
-            fontWeight: 600,
-            color: 'var(--lx-text)',
-          }}>
-            Docker Hosts
-          </div>
+        <div className="lx-card" style={{ flex: '1 1 380px', overflow: 'hidden' }}>
+          <CardHeader>Docker Hosts</CardHeader>
 
           {loading && (
-            <div style={{ padding: '1rem', fontSize: '0.8rem', color: 'var(--lx-text-muted)' }}>
-              Lade…
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '32px 0' }}>
+              <div className="lx-spinner" />
             </div>
           )}
 
           {!loading && hosts.length === 0 && (
-            <div style={{ padding: '1.25rem 1rem', fontSize: '0.8rem', color: 'var(--lx-text-muted)', textAlign: 'center' }}>
-              Noch keine Hosts konfiguriert.
+            <div className="lx-empty" style={{ padding: '40px 16px' }}>
+              <MatIcon name="dns" size={34} />
+              <p style={{ margin: 0, fontSize: '0.8125rem' }}>Noch keine Hosts konfiguriert.</p>
             </div>
           )}
 
-          {hosts.map((host) => (
-            <div
-              key={host.id}
-              onClick={() => startEdit(host)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '0.6rem 1rem',
-                borderBottom: '1px solid var(--lx-border-soft)',
-                cursor: 'pointer',
-                background: editId === host.id
-                  ? `color-mix(in srgb, var(--lx-accent) 8%, transparent)`
-                  : 'transparent',
-              }}
-            >
-              <div>
-                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--lx-text)' }}>
-                  {host.name}
-                </div>
-                <div style={{ fontSize: '0.7rem', color: 'var(--lx-text-muted)', fontFamily: 'monospace' }}>
-                  {host.scheme}://{host.ip}:{host.port}
-                </div>
-              </div>
-              <button
-                onClick={(e) => { e.stopPropagation(); void deleteHost(host.id) }}
-                disabled={busy}
-                title="Löschen"
+          {hosts.map((host) => {
+            const active = editId === host.id
+            return (
+              <div
+                key={host.id}
+                onClick={() => startEdit(host)}
                 style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: busy ? 'not-allowed' : 'pointer',
-                  color: 'var(--lx-state-down)',
-                  fontSize: '1rem',
-                  lineHeight: 1,
-                  padding: '0.2rem 0.4rem',
-                  borderRadius: 'var(--lx-radius-sm)',
-                  opacity: busy ? 0.4 : 0.7,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '12px 16px',
+                  borderBottom: '1px solid var(--lx-border-soft)',
+                  cursor: 'pointer',
+                  background: active ? 'color-mix(in srgb, var(--lx-accent) 8%, transparent)' : 'transparent',
+                  borderLeft: active ? '2px solid var(--lx-accent)' : '2px solid transparent',
+                  transition: 'background 0.12s ease',
                 }}
               >
-                ×
-              </button>
-            </div>
-          ))}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: '0.8125rem', fontWeight: 600, color: active ? 'var(--lx-accent)' : 'var(--lx-text)' }}>
+                    {host.name}
+                  </div>
+                  <div className="lx-mono" style={{ fontSize: '0.6875rem', color: 'var(--lx-text-muted)', marginTop: 2 }}>
+                    {host.scheme}://{host.ip}:{host.port}
+                  </div>
+                </div>
+                <button
+                  className="lx-icon-btn lx-icon-btn--danger"
+                  onClick={(e) => { e.stopPropagation(); void deleteHost(host.id) }}
+                  disabled={busy}
+                  title="Löschen"
+                >
+                  <MatIcon name="delete_outline" size={17} />
+                </button>
+              </div>
+            )
+          })}
         </div>
 
         {/* Add / edit form */}
-        <div style={{
-          flex: '0 0 260px',
-          background: 'var(--lx-surface)',
-          border: '1px solid var(--lx-border-soft)',
-          borderRadius: 'var(--lx-radius-md)',
-          overflow: 'hidden',
-        }}>
-          <div style={{
-            padding: '0.75rem 1rem',
-            borderBottom: '1px solid var(--lx-border-soft)',
-            background: 'var(--lx-elevated)',
-            fontSize: '0.8rem',
-            fontWeight: 600,
-            color: 'var(--lx-text)',
-          }}>
-            {isEditing ? 'Host bearbeiten' : 'Host hinzufügen'}
-          </div>
+        <div className="lx-card" style={{ flex: '0 0 280px', overflow: 'hidden' }}>
+          <CardHeader>{isEditing ? 'Host bearbeiten' : 'Host hinzufügen'}</CardHeader>
 
-          <div style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-            <label style={{ fontSize: '0.72rem', color: 'var(--lx-text-muted)' }}>
-              Name
+          <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div>
+              <label className="lx-label">Name</label>
               <input
-                style={{ ...inputStyle(true), marginTop: 3 }}
+                className="lx-input"
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                 placeholder="prod-server-01"
               />
-            </label>
+            </div>
 
-            <label style={{ fontSize: '0.72rem', color: 'var(--lx-text-muted)' }}>
-              IP-Adresse
+            <div>
+              <label className="lx-label">IP-Adresse</label>
               <input
-                style={{ ...inputStyle(true), marginTop: 3 }}
+                className="lx-input"
                 value={form.ip}
                 onChange={(e) => setForm((f) => ({ ...f, ip: e.target.value }))}
                 placeholder="192.168.1.10"
               />
-            </label>
+            </div>
 
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <label style={{ fontSize: '0.72rem', color: 'var(--lx-text-muted)', flex: 1 }}>
-                Port
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <label className="lx-label">Port</label>
                 <input
                   type="number"
-                  style={{ ...inputStyle(true), marginTop: 3 }}
+                  className="lx-input"
                   value={form.port}
                   onChange={(e) => setForm((f) => ({ ...f, port: Number(e.target.value) }))}
                 />
-              </label>
-              <label style={{ fontSize: '0.72rem', color: 'var(--lx-text-muted)', flex: 1 }}>
-                Schema
+              </div>
+              <div style={{ flex: 1 }}>
+                <label className="lx-label">Schema</label>
                 <select
-                  style={{ ...inputStyle(true), marginTop: 3 }}
+                  className="lx-select"
                   value={form.scheme}
                   onChange={(e) => setForm((f) => ({ ...f, scheme: e.target.value }))}
                 >
                   <option value="http">http</option>
                   <option value="https">https</option>
                 </select>
-              </label>
+              </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: 4 }}>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
               {isEditing && (
-                <ActionButton label="Abbrechen" onClick={cancelEdit} disabled={busy} />
+                <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={cancelEdit} disabled={busy}>
+                  Abbrechen
+                </button>
               )}
-              <ActionButton
-                label={isEditing ? 'Speichern' : 'Hinzufügen'}
+              <button
+                className="lx-btn lx-btn--primary lx-btn--sm"
                 onClick={() => void saveHost()}
                 disabled={busy || !form.name.trim() || !form.ip.trim()}
-                variant="primary"
-              />
+              >
+                {isEditing ? 'Speichern' : 'Hinzufügen'}
+              </button>
             </div>
           </div>
         </div>
