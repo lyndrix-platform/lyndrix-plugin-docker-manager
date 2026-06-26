@@ -65,6 +65,35 @@ function StateBadge({ state }: { state: string | null }) {
   )
 }
 
+// ─── Responsive styles (injected once) ────────────────────────────────────────
+// Inline styles can't carry media queries, so the layout-critical properties live
+// here as classes with a phone breakpoint. Base = desktop; <=640px = mobile.
+
+const DM_STYLES = `
+.dm-page { max-width: 900px; margin: 0 auto; padding: 32px 24px 48px; }
+.dm-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; gap: 16px; }
+.dm-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.dm-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--lx-border-soft); transition: background 0.12s ease; }
+.dm-row-main { flex: 1; min-width: 0; }
+.dm-row-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.dm-grid { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.dm-host-list { flex: 1 1 380px; overflow: hidden; }
+.dm-host-form { flex: 0 0 280px; overflow: hidden; }
+@media (max-width: 640px) {
+  .dm-page { padding: 18px 12px 40px; }
+  .dm-header { flex-direction: column; align-items: stretch; gap: 12px; }
+  .dm-actions { flex-wrap: wrap; }
+  .dm-row { flex-wrap: wrap; }
+  .dm-row-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
+  .dm-grid { flex-direction: column; }
+  .dm-host-list, .dm-host-form { flex: 1 1 auto; width: 100%; }
+}
+`
+
+function DMStyles() {
+  return <style dangerouslySetInnerHTML={{ __html: DM_STYLES }} />
+}
+
 // ─── Container view ───────────────────────────────────────────────────────────
 
 function ContainerRow({
@@ -90,20 +119,13 @@ function ContainerRow({
 
   return (
     <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '12px 16px',
-        borderBottom: '1px solid var(--lx-border-soft)',
-        transition: 'background 0.12s ease',
-      }}
+      className="dm-row"
       onMouseEnter={(e) => (e.currentTarget.style.background =
         'color-mix(in srgb, var(--lx-elevated) 55%, transparent)')}
       onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
     >
       <span style={{ width: 3, height: 34, borderRadius: 2, background: stateColor(container.state), flexShrink: 0 }} />
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="dm-row-main">
         <div style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--lx-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {container.name}
         </div>
@@ -111,7 +133,7 @@ function ContainerRow({
           {container.image ?? '—'} · {container.id}
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+      <div className="dm-row-actions">
         <StateBadge state={container.state} />
         {isRunning ? (
           <>
@@ -240,8 +262,8 @@ function ContainerView() {
     (n, e) => n + e.containers.filter((c) => (c.state ?? '').toLowerCase() === 'running').length, 0)
 
   return (
-    <div style={{ maxWidth: 900, margin: '0 auto', padding: '32px 24px 48px' }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 24, gap: 16 }}>
+    <div className="dm-page">
+      <div className="dm-header">
         <div>
           <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--lx-text)' }}>
             Docker Manager
@@ -250,7 +272,7 @@ function ContainerView() {
             {entries.length} Host{entries.length !== 1 ? 's' : ''} · {totalRunning}/{totalContainers} Container aktiv
           </p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <div className="dm-actions">
           <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={() => void fetchContainers()} disabled={loading}>
             <MatIcon name="refresh" size={15} />{loading ? 'Lade…' : 'Aktualisieren'}
           </button>
@@ -393,7 +415,7 @@ function SettingsView() {
   const isEditing = editId !== null
 
   return (
-    <div style={{ maxWidth: 860, margin: '0 auto', padding: '32px 24px 48px' }}>
+    <div className="dm-page">
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
         <button
@@ -429,10 +451,10 @@ function SettingsView() {
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div className="dm-grid">
 
         {/* Host list */}
-        <div className="lx-card" style={{ flex: '1 1 380px', overflow: 'hidden' }}>
+        <div className="lx-card dm-host-list">
           <CardHeader>Docker Hosts</CardHeader>
 
           {loading && (
@@ -488,7 +510,7 @@ function SettingsView() {
         </div>
 
         {/* Add / edit form */}
-        <div className="lx-card" style={{ flex: '0 0 280px', overflow: 'hidden' }}>
+        <div className="lx-card dm-host-form">
           <CardHeader>{isEditing ? 'Host bearbeiten' : 'Host hinzufügen'}</CardHeader>
 
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -560,5 +582,10 @@ function SettingsView() {
 
 export default function PluginApp() {
   const isSettings = window.location.pathname.endsWith('/settings')
-  return isSettings ? <SettingsView /> : <ContainerView />
+  return (
+    <>
+      <DMStyles />
+      {isSettings ? <SettingsView /> : <ContainerView />}
+    </>
+  )
 }
