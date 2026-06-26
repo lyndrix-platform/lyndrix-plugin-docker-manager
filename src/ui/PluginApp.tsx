@@ -220,10 +220,23 @@ function HostCard({
   )
 }
 
+// In-SPA navigation the shell's BrowserRouter picks up — NOT a full page reload.
+// A full reload (window.location.assign) cold-loads the SPA before the dynamic
+// plugin routes are registered, which bounces to the dashboard / stalls.
+function spaNavigate(path: string) {
+  window.history.pushState({}, '', path)
+  window.dispatchEvent(new PopStateEvent('popstate'))
+}
+
 function goSettings() {
   const p = window.location.pathname.replace(/\/+$/, '')
   const target = p.endsWith('/docker') ? `${p}/settings` : `${p}/docker/settings`
-  window.location.assign(target)
+  spaNavigate(target)
+}
+
+function goBack() {
+  const p = window.location.pathname.replace(/\/+$/, '')
+  spaNavigate(p.endsWith('/settings') ? p.slice(0, -'/settings'.length) : p)
 }
 
 function ContainerView() {
@@ -420,7 +433,7 @@ function SettingsView() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
         <button
           className="lx-icon-btn"
-          onClick={() => window.history.back()}
+          onClick={goBack}
           title="Zurück"
         >
           <MatIcon name="arrow_back" size={18} />
