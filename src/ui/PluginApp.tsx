@@ -198,6 +198,12 @@ function HostCard({
   )
 }
 
+function goSettings() {
+  const p = window.location.pathname.replace(/\/+$/, '')
+  const target = p.endsWith('/docker') ? `${p}/settings` : `${p}/docker/settings`
+  window.location.assign(target)
+}
+
 function ContainerView() {
   const [data, setData] = useState<ContainersResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -244,9 +250,14 @@ function ContainerView() {
             {entries.length} Host{entries.length !== 1 ? 's' : ''} · {totalRunning}/{totalContainers} Container aktiv
           </p>
         </div>
-        <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={() => void fetchContainers()} disabled={loading}>
-          <MatIcon name="refresh" size={15} />{loading ? 'Lade…' : 'Aktualisieren'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={() => void fetchContainers()} disabled={loading}>
+            <MatIcon name="refresh" size={15} />{loading ? 'Lade…' : 'Aktualisieren'}
+          </button>
+          <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={goSettings}>
+            <MatIcon name="settings" size={15} />Settings
+          </button>
+        </div>
       </div>
 
       {error && <ErrorBox msg={error} />}
