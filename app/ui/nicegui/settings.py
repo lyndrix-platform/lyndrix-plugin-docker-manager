@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from nicegui import ui
 
-from ..controller.service import DockerManagerService
+from ...logic.service import DockerManagerService
 
 
 def render_settings_ui(ctx, service: DockerManagerService):
@@ -121,7 +121,9 @@ def render_settings_ui(ctx, service: DockerManagerService):
                 ),
                 (
                     "REST API",
-                    "GET/POST /api/docker-manager/hosts, POST /api/docker-manager/hosts/set, DELETE /api/docker-manager/hosts/{host_id}",
+                    "GET/POST /api/plugins/lyndrix.plugin.docker/hosts | "
+                    "POST /api/plugins/lyndrix.plugin.docker/hosts/set | "
+                    "DELETE /api/plugins/lyndrix.plugin.docker/hosts/{host_id}",
                 ),
             ]
             for title, value in hooks:

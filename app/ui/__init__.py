@@ -1,1 +1,1 @@
-"""UI modules for Docker Manager."""
+"""Docker Manager UI surfaces (nicegui + react)."""

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from nicegui import ui
 
-from ..controller.service import DockerManagerService
+from ...logic.service import DockerManagerService
 
 
 def render_dashboard_widget(_ctx, service: DockerManagerService):

@@ -6,7 +6,7 @@ description: Run, launch, and screenshot the Docker Manager (/docker) plugin UI.
 # Run the Docker Manager (/docker) plugin
 
 This repo is a **lyndrix-core plugin**, not an app — no `main`, no server of its own.
-Its UI is a **React bundle** (`src/ui/PluginApp.tsx` → `ui_static/ui_bundle.js`) that
+Its UI is a **React bundle** (`app/ui/react/PluginApp.tsx` → `app/ui/static/ui_bundle.js`) that
 the **lyndrix-ui** shell loads dynamically once the plugin is mounted in **lyndrix-core**
 and **enabled**. So you run it by booting the shared dev stack and driving the React
 shell at the plugin's route, **not** by launching this repo.
@@ -92,7 +92,7 @@ export LYNDRIX_ADMIN_PASSWORD=$(grep -E '^LYNDRIX_ADMIN_PASSWORD=' ../lyndrix-co
 ```
 
 The React shell (`/apps/lyndrix-plugin-docker/docker`) is the current, verified path and
-the one this repo's `src/ui/` changes affect; use the NiceGUI route only as a fallback.
+the one this repo's `app/ui/react/` changes affect; use the NiceGUI route only as a fallback.
 
 ## Gotchas
 
@@ -105,8 +105,8 @@ the one this repo's `src/ui/` changes affect; use the NiceGUI route only as a fa
   bounces to the Dashboard.
 - **Plugin must be enabled** or the `/apps/*` route renders the loading guard / dashboard
   and never the plugin. Confirm via `/api/health` (above).
-- **Edit → rebuild the bundle.** Changing `src/ui/*.tsx` does nothing until you rebuild
-  `ui_static/ui_bundle.js`: `node node_modules/vite/bin/vite.js build --config vite.ui.config.ts`.
+- **Edit → rebuild the bundle.** Changing `app/ui/react/*.tsx` does nothing until you rebuild
+  `app/ui/static/ui_bundle.js`: `node node_modules/vite/bin/vite.js build --config vite.ui.config.ts`.
   The shell loads the built bundle, not the TSX.
 - **Password, not hardcoded.** The driver reads it from `../lyndrix-core/docker/.env.dev`
   (CRLF-encoded — the driver handles the `\r`).

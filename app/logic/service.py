@@ -1,13 +1,48 @@
 """Service layer for Docker Manager."""
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List
 
 import requests
+
+# Hostnames per RFC 1123 (labels of [a-z0-9-], no leading/trailing hyphen).
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$"
+)
+
+
+def _validate_host_target(value: str) -> None:
+    """Reject SSRF-prone or malformed Docker host targets.
+
+    A host's ``ip`` is operator-supplied and the core process then issues
+    GET/POST requests to it, so we validate it is a sane IP/hostname and block
+    the cloud-metadata / link-local range (169.254.0.0/16, fd00:ec2::/…) and
+    other non-routable categories. Private/loopback addresses stay allowed
+    because Docker proxies commonly live on the LAN or the host itself.
+    """
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        # Not a literal IP — accept it only if it is a syntactically valid hostname.
+        if not _HOSTNAME_RE.match(value):
+            raise ValueError(f"Invalid host address: {value!r}")
+        return
+
+    if (
+        addr.is_link_local
+        or addr.is_multicast
+        or addr.is_unspecified
+        or addr.is_reserved
+    ):
+        raise ValueError(
+            f"Disallowed host address (link-local/metadata/reserved): {value!r}"
+        )
 
 
 class DockerManagerService:
@@ -31,6 +66,9 @@ class DockerManagerService:
         ip = str(raw_host.get("ip", "")).strip()
         if not name or not ip:
             raise ValueError("Host requires 'name' and 'ip'")
+        # Validate the target to reduce the SSRF surface (operator-supplied value
+        # that the core process will issue HTTP requests to).
+        _validate_host_target(ip)
 
         try:
             port = int(raw_host.get("port", 2375) or 2375)
@@ -312,7 +350,14 @@ class DockerManagerService:
                     if not still_running:
                         break
                     time.sleep(0.2)
-            except Exception:
+            except (requests.RequestException, RuntimeError) as exc:
+                # A transient Docker API error during the liveness check must not
+                # silently mask a still-running container; log and skip the kill
+                # fallback rather than assert the container is stopped.
+                if self._ctx:
+                    self._ctx.log.warning(
+                        f"Docker Manager: liveness check after stop failed: {exc}"
+                    )
                 still_running = False
 
             if still_running:

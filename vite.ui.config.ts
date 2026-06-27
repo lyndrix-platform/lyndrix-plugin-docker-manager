@@ -6,12 +6,12 @@ export default defineConfig({
   plugins: [react({ jsxRuntime: 'classic' })],
   build: {
     lib: {
-      entry: resolve(__dirname, 'src/ui/index.tsx'),
+      entry: resolve(__dirname, 'app/ui/react/index.tsx'),
       name: '__lyndrix_plugin_lyndrix_plugin_docker',
       formats: ['iife'],
       fileName: () => 'ui_bundle.js',
     },
-    outDir: 'ui_static',
+    outDir: 'app/ui/static',
     emptyOutDir: true,
     rollupOptions: {
       external: ['react', 'react-dom', 'react-dom/client'],

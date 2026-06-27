@@ -32,9 +32,10 @@ configuring your Docker host(s).
 
 ```
 entrypoint.py        # manifest + lifecycle wiring only
-app/model/           # data structures / persistence helpers
-app/controller/      # service singleton, Docker operations, event handlers
-app/ui/              # NiceGUI pages, widget, settings
+app/logic/           # service singleton, Docker operations, event handlers
+app/api.py           # REST router (mounted at /api/plugins/<id>/)
+app/ui/nicegui/      # NiceGUI pages, widget, settings
+app/ui/react/        # React frontend sources (built to app/ui/static/)
 ```
 
 ## Documentation

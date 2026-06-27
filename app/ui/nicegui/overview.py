@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from nicegui import run, ui
 
-from ..controller.service import DockerManagerService
+from ...logic.service import DockerManagerService
 
 
 def render_overview_ui(ctx, service: DockerManagerService):

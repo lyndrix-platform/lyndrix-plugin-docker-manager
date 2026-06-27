@@ -2,11 +2,12 @@
 
 Architecture
 ------------
-  app/controller/service.py — host persistence + Docker proxy runtime actions
-  app/ui/overview.py        — container overview and runtime controls
-  app/ui/settings.py        — host management for Plugin Manager settings
-  app/ui/widget.py          — compact dashboard widget
-  app/api.py                — REST API for host and container runtime operations
+  app/logic/service.py        — host persistence + Docker proxy runtime actions
+  app/ui/nicegui/overview.py  — container overview and runtime controls
+  app/ui/nicegui/settings.py  — host management for Plugin Manager settings
+  app/ui/nicegui/widget.py    — compact dashboard widget
+  app/ui/react/               — React frontend (canonical migration target)
+  app/api.py                  — REST API for host and container runtime operations
 
 Event bus topics
 ----------------
@@ -17,7 +18,7 @@ Event bus topics
 """
 from nicegui import ui
 
-from core.components.plugins.logic.models import ModuleManifest
+from core.api import ModuleManifest
 
 try:
     from ui.layout import main_layout
@@ -28,10 +29,10 @@ except ImportError:
         return _decorator
 
 from .app.api import build_plugin_router
-from .app.controller.service import docker_manager_service as svc
-from .app.ui.overview import render_overview_ui
-from .app.ui.settings import render_settings_ui as _render_settings_ui
-from .app.ui.widget import render_dashboard_widget as _render_widget
+from .app.logic.service import docker_manager_service as svc
+from .app.ui.nicegui.overview import render_overview_ui
+from .app.ui.nicegui.settings import render_settings_ui as _render_settings_ui
+from .app.ui.nicegui.widget import render_dashboard_widget as _render_widget
 
 
 # ── Manifest ──────────────────────────────────────────────────────────────────
@@ -39,12 +40,12 @@ from .app.ui.widget import render_dashboard_widget as _render_widget
 manifest = ModuleManifest(
     id="lyndrix.plugin.docker",
     name="Docker Manager",
-    version="0.1.1",
+    version="0.2.0",
     description="Docker proxy monitoring with runtime controls (start/stop/restart/logs/shell).",
     author="Lyndrix",
     icon="view_in_ar",
     type="PLUGIN",
-    min_core_version="0.1.1",
+    min_core_version="0.2.0",
     auto_enable_on_install=False,
     repo_url="https://github.com/lyndrix-platform/lyndrix-plugin-docker-manager",
     ui_route="/docker",
@@ -76,7 +77,6 @@ manifest = ModuleManifest(
             "docker_manager:hosts:updated",
             "docker_manager:hosts:state",
             "docker_manager:container:action",
-            "messaging:outbound",
         ],
     },
 )
