@@ -1,4 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react'
+// react-i18next is provided by the host shell (window.__lyndrix_react_i18next);
+// declared external in vite.ui.config.ts so the plugin shares the host's i18n
+// instance + active language. Strings come from locales/docker.<locale>.json,
+// auto-registered by core and served via the catalog (namespace "docker").
+import { useTranslation } from 'react-i18next'
 import { pluginApi, dockerManagerApi } from './lib/api'
 import type { DockerHost } from './lib/api'
 
@@ -240,6 +245,7 @@ function goBack() {
 }
 
 function ContainerView() {
+  const { t } = useTranslation('docker')
   const [data, setData] = useState<ContainersResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -279,10 +285,15 @@ function ContainerView() {
       <div className="dm-header">
         <div>
           <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--lx-text)' }}>
-            Docker Manager
+            {t('title', { defaultValue: 'Docker Manager' })}
           </h1>
           <p style={{ margin: '6px 0 0', fontSize: '0.8125rem', color: 'var(--lx-text-muted)' }}>
-            {entries.length} Host{entries.length !== 1 ? 's' : ''} · {totalRunning}/{totalContainers} Container aktiv
+            {t('subtitle', {
+              defaultValue: '{{hosts}} Host(s) · {{running}}/{{total}} active',
+              hosts: entries.length,
+              running: totalRunning,
+              total: totalContainers,
+            })}
           </p>
         </div>
         <div className="dm-actions">

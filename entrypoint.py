@@ -40,16 +40,19 @@ from .app.ui.nicegui.widget import render_dashboard_widget as _render_widget
 manifest = ModuleManifest(
     id="lyndrix.plugin.docker",
     name="Docker Manager",
-    version="0.2.0",
+    version="0.3.0",
     description="Docker proxy monitoring with runtime controls (start/stop/restart/logs/shell).",
     author="Lyndrix",
     icon="view_in_ar",
     type="PLUGIN",
-    min_core_version="0.2.0",
+    min_core_version="0.3.0",
     auto_enable_on_install=False,
     repo_url="https://github.com/lyndrix-platform/lyndrix-plugin-docker-manager",
     ui_route="/docker",
     react_ui=True,
+    # i18next-shaped namespace served to the React UI; core auto-registers
+    # locales/docker.<locale>.json and adds "docker" to the client allowlist.
+    i18n_namespace="docker",
     react_routes=[
         {
             "path": "/docker",
