@@ -1,0 +1,4 @@
+{
+  "title": "Docker-Verwaltung",
+  "subtitle": "{{hosts}} Host(s) · {{running}}/{{total}} Container aktiv"
+}
