@@ -188,6 +188,50 @@ class DockerManagerService:
 
         return host
 
+    def sync_orchestrator_hosts(self, incoming: list[dict]) -> dict:
+        """Upsert docker hosts by name without removing unrecognized entries.
+
+        Intended for automated callers (IaC Orchestrator) that know about a
+        subset of hosts. Existing hosts with names not in ``incoming`` are left
+        untouched so manually-added hosts survive inventory refreshes.
+
+        Returns a stats dict: ``{"added": n, "updated": n, "total": n}``.
+        """
+        with self._lock:
+            by_name: dict[str, dict] = {h["name"]: dict(h) for h in self._hosts}
+            next_id = max((h["id"] for h in by_name.values()), default=0) + 1
+            added = updated = 0
+
+            for raw in incoming:
+                name = str(raw.get("name") or "").strip()
+                if not name:
+                    continue
+                if name in by_name:
+                    # Preserve id; overwrite connection fields from the inventory.
+                    merged = {
+                        **by_name[name],
+                        **{k: raw[k] for k in ("ip", "port", "scheme") if k in raw},
+                    }
+                    try:
+                        by_name[name] = self._normalize_host(merged, fallback_id=by_name[name]["id"])
+                        updated += 1
+                    except ValueError:
+                        continue
+                else:
+                    try:
+                        host = self._normalize_host({**raw, "id": next_id}, fallback_id=next_id)
+                        by_name[name] = host
+                        next_id += 1
+                        added += 1
+                    except ValueError:
+                        continue
+
+            self._hosts = sorted(by_name.values(), key=lambda h: h["id"])
+
+        self.save_hosts_to_vault()
+        self._emit_hosts_updated()
+        return {"added": added, "updated": updated, "total": len(self._hosts)}
+
     def delete_host(self, host_id: int, *, persist: bool = True, emit: bool = True) -> bool:
         with self._lock:
             before = len(self._hosts)

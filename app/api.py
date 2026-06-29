@@ -31,6 +31,18 @@ class DockerHostsSetPayload(BaseModel):
     hosts: List[DockerHostPayload]
 
 
+class DockerHostSyncEntry(BaseModel):
+    """Minimal host descriptor used for automated upserts (no id field)."""
+    name: str
+    ip: str
+    port: int = Field(default=2375)
+    scheme: str = Field(default="http")
+
+
+class DockerHostSyncPayload(BaseModel):
+    hosts: List[DockerHostSyncEntry]
+
+
 class ContainerActionPayload(BaseModel):
     host_id: int
     container_id: str
@@ -59,6 +71,26 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
                 service.upsert_host, payload.model_dump(exclude_none=True)
             )
             return {"host": host, "hosts": service.list_hosts()}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/hosts/sync")
+    async def sync_hosts(
+        payload: DockerHostSyncPayload,
+        identity: ApiIdentity = Depends(require_permission("api:write")),
+    ):
+        """Upsert hosts by name without removing unrecognized entries.
+
+        Intended for automated callers (IaC Orchestrator, Ansible, scripts).
+        Hosts present in the current list but absent from ``payload.hosts``
+        are left untouched — unlike ``/hosts/set`` which replaces everything.
+        """
+        try:
+            stats = await asyncio.to_thread(
+                service.sync_orchestrator_hosts,
+                [h.model_dump() for h in payload.hosts],
+            )
+            return {"ok": True, **stats, "hosts": service.list_hosts()}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

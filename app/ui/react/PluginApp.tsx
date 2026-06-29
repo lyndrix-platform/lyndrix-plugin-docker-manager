@@ -71,8 +71,6 @@ function StateBadge({ state }: { state: string | null }) {
 }
 
 // ─── Responsive styles (injected once) ────────────────────────────────────────
-// Inline styles can't carry media queries, so the layout-critical properties live
-// here as classes with a phone breakpoint. Base = desktop; <=640px = mobile.
 
 const DM_STYLES = `
 .dm-page { max-width: 900px; margin: 0 auto; padding: 32px 24px 48px; }
@@ -84,6 +82,9 @@ const DM_STYLES = `
 .dm-grid { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 .dm-host-list { flex: 1 1 380px; overflow: hidden; }
 .dm-host-form { flex: 0 0 280px; overflow: hidden; }
+.dm-tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.75rem; }
+.dm-host-tile { display: flex; flex-direction: column; gap: 10px; padding: 1rem; width: 100%; text-align: left; cursor: pointer; border-radius: var(--lx-radius-md); background: none; transition: border-color 0.18s, background 0.18s; }
+.dm-host-tile:hover { background: color-mix(in srgb, var(--lx-accent) 5%, var(--lx-surface)) !important; }
 @media (max-width: 640px) {
   .dm-page { padding: 18px 12px 40px; }
   .dm-header { flex-direction: column; align-items: stretch; gap: 12px; }
@@ -92,6 +93,15 @@ const DM_STYLES = `
   .dm-row-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
   .dm-grid { flex-direction: column; }
   .dm-host-list, .dm-host-form { flex: 1 1 auto; width: 100%; }
+  .dm-tile-grid { grid-template-columns: 1fr; }
+  .dm-modal-overlay {
+    /* Top-align on mobile, but keep clear of the OS status bar / notch
+       (viewport-fit=cover makes env(safe-area-inset-top) non-zero there). */
+    padding: calc(env(safe-area-inset-top, 0px) + 0.6rem) 0.6rem
+             calc(env(safe-area-inset-bottom, 0px) + 0.6rem) !important;
+    align-items: flex-start !important;
+  }
+  .dm-modal-overlay > div { max-height: 92vh !important; }
 }
 `
 
@@ -99,7 +109,7 @@ function DMStyles() {
   return <style dangerouslySetInnerHTML={{ __html: DM_STYLES }} />
 }
 
-// ─── Container view ───────────────────────────────────────────────────────────
+// ─── ContainerRow ─────────────────────────────────────────────────────────────
 
 function ContainerRow({
   container,
@@ -159,75 +169,112 @@ function ContainerRow({
   )
 }
 
-function HostCard({
-  entry,
-  onAction,
-  onRefresh,
-}: {
-  entry: HostEntry
-  onAction: (hostId: number, containerId: string, action: ContainerAction) => Promise<void>
-  onRefresh: () => void
-}) {
-  const { host, containers, error } = entry
-  const runningCount = containers.filter((c) => (c.state ?? '').toLowerCase() === 'running').length
+// ─── Modal ────────────────────────────────────────────────────────────────────
 
+function Modal({ title, subtitle, onClose, children }: {
+  title: string
+  subtitle?: string
+  onClose: () => void
+  children: React.ReactNode
+}) {
   return (
-    <div className="lx-card" style={{ marginBottom: 16, overflow: 'hidden' }}>
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '14px 16px',
-        borderBottom: '1px solid var(--lx-border-soft)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }}>
-          <div style={{
-            width: 36, height: 36, borderRadius: 'var(--lx-radius-sm)', flexShrink: 0,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'color-mix(in srgb, var(--lx-accent) 12%, transparent)', color: 'var(--lx-accent)',
-          }}>
-            <MatIcon name="dns" size={20} />
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--lx-text)' }}>{host.name}</div>
-            <div className="lx-mono" style={{ fontSize: '0.6875rem', color: 'var(--lx-text-muted)', marginTop: 2 }}>
-              {host.scheme}://{host.ip}:{host.port}
+    <div
+      className="dm-modal-overlay"
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '1.5rem',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: '100%', maxWidth: 680,
+          maxHeight: '85vh',
+          background: 'var(--lx-elevated)',
+          borderRadius: 'var(--lx-radius-md)',
+          border: '1px solid var(--lx-border)',
+          boxShadow: 'var(--lx-glow)',
+          display: 'flex', flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '14px 16px',
+          borderBottom: '1px solid var(--lx-border-soft)',
+          flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <MatIcon name="dns" size={18} />
+            <div>
+              <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--lx-text)' }}>{title}</div>
+              {subtitle && (
+                <div className="lx-mono" style={{ fontSize: '0.6875rem', color: 'var(--lx-text-muted)', marginTop: 1 }}>{subtitle}</div>
+              )}
             </div>
           </div>
+          <button className="lx-icon-btn" onClick={onClose} title="Schließen">
+            <MatIcon name="close" size={18} />
+          </button>
         </div>
-        {error ? (
-          <span className="lx-badge lx-badge--down"><span className="lx-dot" />Verbindungsfehler</span>
-        ) : (
-          <span className="lx-badge lx-badge--muted">{runningCount}/{containers.length} aktiv</span>
-        )}
+        <div style={{ overflowY: 'auto', flex: 1 }}>
+          {children}
+        </div>
       </div>
-
-      {error && (
-        <div style={{ padding: '14px 16px', fontSize: '0.8125rem', color: 'var(--lx-state-down)' }}>{error}</div>
-      )}
-      {!error && containers.length === 0 && (
-        <div style={{ padding: '20px 16px', fontSize: '0.8125rem', color: 'var(--lx-text-muted)', textAlign: 'center' }}>
-          Keine Container gefunden.
-        </div>
-      )}
-      {!error && containers.map((c) => (
-        <ContainerRow
-          key={c.id || c.name}
-          container={c}
-          hostId={host.id}
-          onAction={async (hid, cid, action) => {
-            await onAction(hid, cid, action)
-            onRefresh()
-          }}
-        />
-      ))}
     </div>
   )
 }
 
+// ─── HostTile — clickable tile that opens the container modal ─────────────────
+
+function HostTile({ entry, onClick }: { entry: HostEntry; onClick: () => void }) {
+  const { host, containers, error } = entry
+  const runningCount = containers.filter((c) => (c.state ?? '').toLowerCase() === 'running').length
+  const allRunning = containers.length > 0 && runningCount === containers.length
+  const accent = error ? 'var(--lx-state-down)' : allRunning ? 'var(--lx-state-up)' : 'var(--lx-accent)'
+
+  return (
+    <button
+      className="lx-card dm-host-tile"
+      onClick={onClick}
+      style={{ borderTop: `2px solid ${accent}` }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <div style={{
+          width: 32, height: 32, borderRadius: 'var(--lx-radius-sm)', flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: `color-mix(in srgb, ${accent} 12%, transparent)`,
+          color: accent,
+        }}>
+          <MatIcon name="dns" size={18} />
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--lx-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {host.name}
+          </div>
+          <div className="lx-mono" style={{ fontSize: '0.6875rem', color: 'var(--lx-text-muted)', marginTop: 2 }}>
+            {host.ip}:{host.port}
+          </div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        {error ? (
+          <span className="lx-badge lx-badge--down"><span className="lx-dot" />Offline</span>
+        ) : (
+          <span className={`lx-badge ${allRunning ? 'lx-badge--up' : 'lx-badge--muted'}`}>
+            <span className="lx-dot" />{runningCount}/{containers.length} aktiv
+          </span>
+        )}
+        <span className="material-icons" style={{ fontSize: 13, color: 'var(--lx-text-muted)', opacity: 0.4 }}>arrow_forward</span>
+      </div>
+    </button>
+  )
+}
+
 // In-SPA navigation the shell's BrowserRouter picks up — NOT a full page reload.
-// A full reload (window.location.assign) cold-loads the SPA before the dynamic
-// plugin routes are registered, which bounces to the dashboard / stalls.
 function spaNavigate(path: string) {
   window.history.pushState({}, '', path)
   window.dispatchEvent(new PopStateEvent('popstate'))
@@ -244,12 +291,15 @@ function goBack() {
   spaNavigate(p.endsWith('/settings') ? p.slice(0, -'/settings'.length) : p)
 }
 
+// ─── Container view ───────────────────────────────────────────────────────────
+
 function ContainerView() {
   const { t } = useTranslation('docker')
   const [data, setData] = useState<ContainersResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [selectedEntry, setSelectedEntry] = useState<HostEntry | null>(null)
 
   const fetchContainers = useCallback(async () => {
     setLoading(true)
@@ -257,6 +307,12 @@ function ContainerView() {
     try {
       const result = await pluginApi.get<ContainersResponse>('containers')
       setData(result)
+      // Keep modal data fresh after refresh or container action
+      setSelectedEntry((prev) => {
+        if (!prev) return null
+        const updated = Object.values(result).find((e) => e.host.id === prev.host.id)
+        return updated ?? prev
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Fehler beim Laden')
     } finally {
@@ -270,6 +326,7 @@ function ContainerView() {
     setActionError(null)
     try {
       await pluginApi.post('containers/action', { host_id: hostId, container_id: containerId, action })
+      await fetchContainers()
     } catch (err) {
       setActionError(err instanceof Error ? err.message : `Aktion '${action}' fehlgeschlagen`)
     }
@@ -322,14 +379,42 @@ function ContainerView() {
         </div>
       )}
 
-      {entries.map((entry) => (
-        <HostCard
-          key={entry.host.id}
-          entry={entry}
-          onAction={handleAction}
-          onRefresh={() => void fetchContainers()}
-        />
-      ))}
+      <div className="dm-tile-grid">
+        {entries.map((entry) => (
+          <HostTile
+            key={entry.host.id}
+            entry={entry}
+            onClick={() => setSelectedEntry(entry)}
+          />
+        ))}
+      </div>
+
+      {selectedEntry && (
+        <Modal
+          title={selectedEntry.host.name}
+          subtitle={`${selectedEntry.host.scheme}://${selectedEntry.host.ip}:${selectedEntry.host.port}`}
+          onClose={() => setSelectedEntry(null)}
+        >
+          {selectedEntry.error && (
+            <div style={{ padding: '14px 16px', fontSize: '0.8125rem', color: 'var(--lx-state-down)' }}>
+              {selectedEntry.error}
+            </div>
+          )}
+          {!selectedEntry.error && selectedEntry.containers.length === 0 && (
+            <div style={{ padding: '20px 16px', fontSize: '0.8125rem', color: 'var(--lx-text-muted)', textAlign: 'center' }}>
+              Keine Container gefunden.
+            </div>
+          )}
+          {!selectedEntry.error && selectedEntry.containers.map((c) => (
+            <ContainerRow
+              key={c.id || c.name}
+              container={c}
+              hostId={selectedEntry.host.id}
+              onAction={handleAction}
+            />
+          ))}
+        </Modal>
+      )}
     </div>
   )
 }
