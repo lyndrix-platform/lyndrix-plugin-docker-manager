@@ -10,16 +10,16 @@ def render_settings_ui(ctx, service: DockerManagerService):
     del ctx
 
     with ui.column().classes("w-full gap-4"):
-        ui.label("Docker Hosts").classes("text-base font-semibold text-zinc-200")
+        ui.label("Docker Hosts").classes("text-base font-semibold text-[var(--lx-text)]")
         ui.label(
             "Manage Docker proxy hosts used by this plugin. Hosts are persisted in Vault, "
             "can be updated via API, and via event bus topics."
-        ).classes("text-xs text-zinc-400")
+        ).classes("text-xs text-[var(--lx-text-muted)]")
 
         current_host = {"id": None}
 
         with ui.row().classes("w-full gap-4 flex-wrap lg:flex-nowrap items-start"):
-            with ui.card().classes("w-full lg:w-2/3 p-4 bg-zinc-900 border border-zinc-700"):
+            with ui.card().classes("w-full lg:w-2/3 p-4 bg-[var(--lx-elevated)] border border-[var(--lx-border-soft)]"):
                 host_columns = [
                     {"name": "name", "label": "Host Name", "field": "name", "align": "left", "sortable": True},
                     {"name": "ip", "label": "IP Address", "field": "ip", "align": "left"},
@@ -32,10 +32,10 @@ def render_settings_ui(ctx, service: DockerManagerService):
                     row_key="id",
                     selection="single",
                     pagination=15,
-                ).classes("w-full no-shadow border border-zinc-700")
+                ).classes("w-full no-shadow border border-[var(--lx-border-soft)]")
 
-            with ui.card().classes("w-full lg:w-1/3 p-4 bg-zinc-900 border border-zinc-700"):
-                form_title = ui.label("Add Docker Host").classes("text-sm font-semibold text-zinc-200")
+            with ui.card().classes("w-full lg:w-1/3 p-4 bg-[var(--lx-elevated)] border border-[var(--lx-border-soft)]"):
+                form_title = ui.label("Add Docker Host").classes("text-sm font-semibold text-[var(--lx-text)]")
                 name_input = ui.input("Host Name").classes("w-full").props("outlined dense")
                 ip_input = ui.input("IP Address").classes("w-full").props("outlined dense")
                 with ui.row().classes("w-full gap-2 flex-nowrap"):
@@ -102,14 +102,14 @@ def render_settings_ui(ctx, service: DockerManagerService):
                 host_table.on("selection", _on_selection)
 
                 with ui.row().classes("w-full justify-between items-center mt-2"):
-                    btn_delete = ui.button(icon="delete", on_click=_delete_host, color="red").props("unelevated round")
+                    btn_delete = ui.button(icon="delete", on_click=_delete_host, color="negative").props("unelevated round")
                     btn_delete.set_visibility(False)
                     with ui.row().classes("gap-2"):
                         ui.button("Cancel", on_click=_clear_form).props("flat")
                         ui.button("Save", on_click=_save_host, color="primary").props("unelevated")
 
-        with ui.card().classes("w-full p-4 bg-zinc-900 border border-zinc-700 gap-2"):
-            ui.label("Automation Hooks").classes("text-sm font-semibold text-zinc-200")
+        with ui.card().classes("w-full p-4 bg-[var(--lx-elevated)] border border-[var(--lx-border-soft)] gap-2"):
+            ui.label("Automation Hooks").classes("text-sm font-semibold text-[var(--lx-text)]")
             hooks = [
                 (
                     "EventBus subscribe",
@@ -127,6 +127,8 @@ def render_settings_ui(ctx, service: DockerManagerService):
                 ),
             ]
             for title, value in hooks:
-                with ui.row().classes("w-full items-start gap-3 border-b border-zinc-800 py-1"):
-                    ui.label(title).classes("text-xs text-zinc-500 w-40 shrink-0")
-                    ui.label(value).classes("text-xs font-mono text-emerald-400")
+                with ui.row().classes("w-full items-start gap-3 border-b border-[var(--lx-border-soft)] py-1"):
+                    ui.label(title).classes("text-xs text-[var(--lx-text-muted)] w-40 shrink-0")
+                    ui.label(value).classes(
+                        "text-xs [font-family:var(--lx-font-mono)] text-[var(--lx-log-accent)]"
+                    )
