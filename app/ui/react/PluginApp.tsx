@@ -30,13 +30,15 @@ type ContainerAction = 'start' | 'stop' | 'restart'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function stateColor(state: string | null): string {
+// Maps container state to the shared `.lx-status-rail` modifier (Theming v2
+// T0b) — the default (no modifier) already renders --lx-state-unknown.
+function stateRailClass(state: string | null): string {
   switch ((state ?? '').toLowerCase()) {
-    case 'running': return 'var(--lx-state-up)'
+    case 'running': return 'lx-status-rail--up'
     case 'exited':
-    case 'dead':   return 'var(--lx-state-down)'
-    case 'paused': return 'var(--lx-state-paused)'
-    default:       return 'var(--lx-state-unknown)'
+    case 'dead':   return 'lx-status-rail--down'
+    case 'paused': return 'lx-status-rail--paused'
+    default:       return ''
   }
 }
 
@@ -57,7 +59,9 @@ function stateLabel(state: string | null): string {
 
 // ─── Shared sub-components ────────────────────────────────────────────────────
 
-function MatIcon({ name, size = 18 }: { name: string; size?: number }) {
+// size accepts the `--lx-icon-*` scale (xs/sm/md/lg) as a CSS var string, or a
+// raw px number for the rare case that falls outside the scale.
+function MatIcon({ name, size = 'var(--lx-icon-md)' }: { name: string; size?: number | string }) {
   return <span className="material-icons" style={{ fontSize: size }}>{name}</span>
 }
 
@@ -76,14 +80,14 @@ const DM_STYLES = `
 .dm-page { max-width: 900px; margin: 0 auto; padding: 32px 24px 48px; }
 .dm-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; gap: 16px; }
 .dm-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.dm-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--lx-border-soft); transition: background 0.12s ease; }
+.dm-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--lx-border-soft); transition: background var(--lx-transition-fast) var(--lx-ease); }
 .dm-row-main { flex: 1; min-width: 0; }
 .dm-row-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .dm-grid { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 .dm-host-list { flex: 1 1 380px; overflow: hidden; }
 .dm-host-form { flex: 0 0 280px; overflow: hidden; }
 .dm-tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.75rem; }
-.dm-host-tile { display: flex; flex-direction: column; gap: 10px; padding: 1rem; width: 100%; text-align: left; cursor: pointer; border-radius: var(--lx-radius-md); background: none; transition: border-color 0.18s, background 0.18s; }
+.dm-host-tile { display: flex; flex-direction: column; gap: 10px; padding: 1rem; width: 100%; text-align: left; cursor: pointer; border-radius: var(--lx-radius-md); background: none; transition: border-color var(--lx-transition-base) var(--lx-ease), background var(--lx-transition-base) var(--lx-ease); }
 .dm-host-tile:hover { background: color-mix(in srgb, var(--lx-accent) 5%, var(--lx-surface)) !important; }
 @media (max-width: 640px) {
   .dm-page { padding: 18px 12px 40px; }
@@ -139,7 +143,7 @@ function ContainerRow({
         'color-mix(in srgb, var(--lx-elevated) 55%, transparent)')}
       onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
     >
-      <span style={{ width: 3, height: 34, borderRadius: 2, background: stateColor(container.state), flexShrink: 0 }} />
+      <span className={`lx-status-rail ${stateRailClass(container.state)}`} />
       <div className="dm-row-main">
         <div style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--lx-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {container.name}
@@ -153,15 +157,15 @@ function ContainerRow({
         {isRunning ? (
           <>
             <button className="lx-btn lx-btn--secondary lx-btn--sm" disabled={busy} onClick={() => void act('restart')}>
-              <MatIcon name="restart_alt" size={15} />Restart
+              <MatIcon name="restart_alt" size="var(--lx-icon-sm)" />Restart
             </button>
             <button className="lx-btn lx-btn--danger lx-btn--sm" disabled={busy} onClick={() => void act('stop')}>
-              <MatIcon name="stop" size={15} />Stop
+              <MatIcon name="stop" size="var(--lx-icon-sm)" />Stop
             </button>
           </>
         ) : (
           <button className="lx-btn lx-btn--primary lx-btn--sm" disabled={busy} onClick={() => void act('start')}>
-            <MatIcon name="play_arrow" size={15} />Start
+            <MatIcon name="play_arrow" size="var(--lx-icon-sm)" />Start
           </button>
         )}
       </div>
@@ -179,14 +183,9 @@ function Modal({ title, subtitle, onClose, children }: {
 }) {
   return (
     <div
-      className="dm-modal-overlay"
+      className="lx-modal-overlay dm-modal-overlay"
       onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 1000,
-        background: 'rgba(0,0,0,0.55)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: '1.5rem',
-      }}
+      style={{ padding: '1.5rem' }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -208,7 +207,7 @@ function Modal({ title, subtitle, onClose, children }: {
           flexShrink: 0,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <MatIcon name="dns" size={18} />
+            <MatIcon name="dns" size="var(--lx-icon-md)" />
             <div>
               <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--lx-text)' }}>{title}</div>
               {subtitle && (
@@ -217,7 +216,7 @@ function Modal({ title, subtitle, onClose, children }: {
             </div>
           </div>
           <button className="lx-icon-btn" onClick={onClose} title="Schließen">
-            <MatIcon name="close" size={18} />
+            <MatIcon name="close" size="var(--lx-icon-md)" />
           </button>
         </div>
         <div style={{ overflowY: 'auto', flex: 1 }}>
@@ -249,7 +248,7 @@ function HostTile({ entry, onClick }: { entry: HostEntry; onClick: () => void })
           background: `color-mix(in srgb, ${accent} 12%, transparent)`,
           color: accent,
         }}>
-          <MatIcon name="dns" size={18} />
+          <MatIcon name="dns" size="var(--lx-icon-md)" />
         </div>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--lx-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -268,7 +267,7 @@ function HostTile({ entry, onClick }: { entry: HostEntry; onClick: () => void })
             <span className="lx-dot" />{runningCount}/{containers.length} aktiv
           </span>
         )}
-        <span className="material-icons" style={{ fontSize: 13, color: 'var(--lx-text-muted)', opacity: 0.4 }}>arrow_forward</span>
+        <span className="material-icons" style={{ fontSize: 'var(--lx-icon-xs)', color: 'var(--lx-text-muted)', opacity: 0.4 }}>arrow_forward</span>
       </div>
     </button>
   )
@@ -355,10 +354,10 @@ function ContainerView() {
         </div>
         <div className="dm-actions">
           <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={() => void fetchContainers()} disabled={loading}>
-            <MatIcon name="refresh" size={15} />{loading ? 'Lade…' : 'Aktualisieren'}
+            <MatIcon name="refresh" size="var(--lx-icon-sm)" />{loading ? 'Lade…' : 'Aktualisieren'}
           </button>
           <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={goSettings}>
-            <MatIcon name="settings" size={15} />Settings
+            <MatIcon name="settings" size="var(--lx-icon-sm)" />Settings
           </button>
         </div>
       </div>
@@ -374,7 +373,7 @@ function ContainerView() {
 
       {!loading && data && entries.length === 0 && (
         <div className="lx-card lx-empty">
-          <MatIcon name="dns" size={34} />
+          <MatIcon name="dns" size="var(--lx-icon-lg)" />
           <p style={{ margin: 0, fontSize: '0.875rem' }}>Keine Docker-Hosts konfiguriert.</p>
         </div>
       )}
@@ -435,7 +434,7 @@ function ErrorBox({ msg }: { msg: string }) {
       fontSize: '0.8125rem',
       marginBottom: 16,
     }}>
-      <MatIcon name="error_outline" size={17} />{msg}
+      <MatIcon name="error_outline" size="var(--lx-icon-md)" />{msg}
     </div>
   )
 }
@@ -532,7 +531,7 @@ function SettingsView() {
           onClick={goBack}
           title="Zurück"
         >
-          <MatIcon name="arrow_back" size={18} />
+          <MatIcon name="arrow_back" size="var(--lx-icon-md)" />
         </button>
         <div>
           <h1 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--lx-text)' }}>
@@ -556,7 +555,7 @@ function SettingsView() {
           fontSize: '0.8125rem',
           marginBottom: 16,
         }}>
-          <MatIcon name="check_circle" size={17} />{notice}
+          <MatIcon name="check_circle" size="var(--lx-icon-md)" />{notice}
         </div>
       )}
 
@@ -574,7 +573,7 @@ function SettingsView() {
 
           {!loading && hosts.length === 0 && (
             <div className="lx-empty" style={{ padding: '40px 16px' }}>
-              <MatIcon name="dns" size={34} />
+              <MatIcon name="dns" size="var(--lx-icon-lg)" />
               <p style={{ margin: 0, fontSize: '0.8125rem' }}>Noch keine Hosts konfiguriert.</p>
             </div>
           )}
@@ -594,7 +593,7 @@ function SettingsView() {
                   cursor: 'pointer',
                   background: active ? 'color-mix(in srgb, var(--lx-accent) 8%, transparent)' : 'transparent',
                   borderLeft: active ? '2px solid var(--lx-accent)' : '2px solid transparent',
-                  transition: 'background 0.12s ease',
+                  transition: 'background var(--lx-transition-fast) var(--lx-ease)',
                 }}
               >
                 <div style={{ minWidth: 0 }}>
@@ -611,7 +610,7 @@ function SettingsView() {
                   disabled={busy}
                   title="Löschen"
                 >
-                  <MatIcon name="delete_outline" size={17} />
+                  <MatIcon name="delete_outline" size="var(--lx-icon-md)" />
                 </button>
               </div>
             )
