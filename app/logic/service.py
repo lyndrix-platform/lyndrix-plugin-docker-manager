@@ -305,17 +305,28 @@ class DockerManagerService:
 
         return dict(sorted(results.items(), key=lambda item: item[1]["host"]["name"].lower()))
 
-    @staticmethod
-    def _container_refs(container_id: str, container_name: str | None = None) -> List[str]:
+    _REF_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+    @classmethod
+    def _validate_ref(cls, ref: str) -> str:
+        # These refs are interpolated directly into Docker agent URLs
+        # (/containers/{ref}/...) — reject anything that isn't a plain
+        # container id/name to prevent path/URL injection.
+        if not cls._REF_RE.fullmatch(ref):
+            raise ValueError(f"Invalid container reference: {ref!r}")
+        return ref
+
+    @classmethod
+    def _container_refs(cls, container_id: str, container_name: str | None = None) -> List[str]:
         refs: List[str] = []
         raw_id = (container_id or "").strip()
         if raw_id:
-            refs.append(raw_id)
+            refs.append(cls._validate_ref(raw_id))
             if len(raw_id) > 12:
                 refs.append(raw_id[:12])
         raw_name = (container_name or "").strip().lstrip("/")
         if raw_name:
-            refs.append(raw_name)
+            refs.append(cls._validate_ref(raw_name))
 
         # keep order while removing duplicates
         seen = set()

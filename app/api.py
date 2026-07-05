@@ -18,6 +18,14 @@ from core.api import ApiIdentity, require_permission
 
 from .logic.service import DockerManagerService
 
+# Plugin-scoped permission ids. Gating routes on the fully-qualified
+# plugin:<id>:api:* (rather than bare api:read/api:write) makes the manifest's
+# scoped viewer/operator roles actually unlock routes, while global api:read/
+# api:write holders keep working via the core's one-directional fallback.
+PLUGIN_ID = "lyndrix.plugin.docker"
+PERM_READ = f"plugin:{PLUGIN_ID}:api:read"
+PERM_WRITE = f"plugin:{PLUGIN_ID}:api:write"
+
 
 class DockerHostPayload(BaseModel):
     id: Optional[int] = Field(default=None)
@@ -55,13 +63,13 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
 
     # ── Hosts ────────────────────────────────────────────────────────────────
     @router.get("/hosts")
-    async def list_hosts(identity: ApiIdentity = Depends(require_permission("api:read"))):
+    async def list_hosts(identity: ApiIdentity = Depends(require_permission(PERM_READ))):
         return {"hosts": service.list_hosts()}
 
     @router.post("/hosts")
     async def upsert_host(
         payload: DockerHostPayload,
-        identity: ApiIdentity = Depends(require_permission("api:write")),
+        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
     ):
         try:
             # Drop a null id so the service treats this as a create (it requires
@@ -77,7 +85,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.post("/hosts/sync")
     async def sync_hosts(
         payload: DockerHostSyncPayload,
-        identity: ApiIdentity = Depends(require_permission("api:write")),
+        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
     ):
         """Upsert hosts by name without removing unrecognized entries.
 
@@ -97,7 +105,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.post("/hosts/set")
     async def set_hosts(
         payload: DockerHostsSetPayload,
-        identity: ApiIdentity = Depends(require_permission("api:write")),
+        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
     ):
         try:
             hosts = await asyncio.to_thread(
@@ -110,7 +118,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.delete("/hosts/{host_id}")
     async def delete_host(
         host_id: int,
-        identity: ApiIdentity = Depends(require_permission("api:write")),
+        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
     ):
         if not await asyncio.to_thread(service.delete_host, host_id):
             raise HTTPException(status_code=404, detail=f"Unknown host id: {host_id}")
@@ -120,7 +128,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.get("/containers")
     async def list_containers(
         include_stopped: bool = True,
-        identity: ApiIdentity = Depends(require_permission("api:read")),
+        identity: ApiIdentity = Depends(require_permission(PERM_READ)),
     ):
         # fetch_all_containers_parallel blocks on synchronous network I/O
         # (ThreadPoolExecutor + requests); keep it off the shared event loop.
@@ -131,7 +139,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.post("/containers/action")
     async def container_action(
         payload: ContainerActionPayload,
-        identity: ApiIdentity = Depends(require_permission("api:write")),
+        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
     ):
         try:
             return await asyncio.to_thread(
@@ -150,7 +158,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
         host_id: int,
         container_id: str,
         tail: int = 200,
-        identity: ApiIdentity = Depends(require_permission("api:read")),
+        identity: ApiIdentity = Depends(require_permission(PERM_READ)),
     ):
         try:
             return {
@@ -170,15 +178,13 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     async def container_shell(
         host_id: int,
         container_id: str,
-        identity: ApiIdentity = Depends(require_permission("api:write")),
+        identity: ApiIdentity = Depends(require_permission("plugin:lyndrix.plugin.docker:docker:exec")),
     ):
         # SECURITY: this runs a Docker `exec` inside the target container, i.e.
-        # in-container code execution across the reachable fleet. It is gated on
-        # the generic `api:write` permission; the read-only fallback handles
-        # socket proxies that block /exec (HTTP 403).
-        # TODO(agent): gate behind a dedicated stronger permission (e.g.
-        # "docker:exec") once the core permission registry supports plugin-scoped
-        # permissions, rather than the generic api:write grant.
+        # in-container code execution across the reachable fleet. Gated on the
+        # dedicated docker:exec permission — the core's global api:write compat
+        # fallback only covers plain :api:read/:api:write suffixes, so holding
+        # the generic api:write permission alone does NOT satisfy this check.
         try:
             return {
                 "host_id": host_id,

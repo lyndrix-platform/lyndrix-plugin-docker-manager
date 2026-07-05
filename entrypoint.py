@@ -86,6 +86,34 @@ manifest = ModuleManifest(
             "docker_manager:container:action",
         ],
     },
+    # Identity & Permissions 2.0: dedicated exec permission (container shell
+    # access is more sensitive than a plain write) + roles auto-mapped onto
+    # groups. Role permissions are fully qualified (plugin:<id>:api:*) rather
+    # than the bare global api:read/write, so granting them only ever affects
+    # this plugin.
+    custom_permissions=[
+        {"id": "docker:exec", "label": "Container Shell Exec",
+         "description": "Open an interactive shell session inside a managed container",
+         "icon": "terminal"},
+    ],
+    roles=[
+        {"id": "admin", "label": "Docker Manager Administrator",
+         "permissions": [
+             "plugin:lyndrix.plugin.docker:api:read",
+             "plugin:lyndrix.plugin.docker:api:write",
+             "plugin:lyndrix.plugin.docker:docker:exec",
+         ],
+         "auto_map_groups": ["INT_ADMIN"],
+         "description": "Full control including container shell exec."},
+        {"id": "operator", "label": "Docker Manager Operator",
+         "permissions": ["plugin:lyndrix.plugin.docker:api:read", "plugin:lyndrix.plugin.docker:api:write"],
+         "auto_map_groups": [],
+         "description": "Manage hosts and containers, no shell exec."},
+        {"id": "viewer", "label": "Docker Manager Viewer",
+         "permissions": ["plugin:lyndrix.plugin.docker:api:read"],
+         "auto_map_groups": [],
+         "description": "Read-only access to hosts and containers."},
+    ],
 )
 
 
