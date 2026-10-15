@@ -64,7 +64,8 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     # ── Hosts ────────────────────────────────────────────────────────────────
     @router.get("/hosts")
     async def list_hosts(identity: ApiIdentity = Depends(require_permission(PERM_READ))):
-        return {"hosts": service.list_hosts()}
+        # Cached per instance; re-read from the shared table when stale.
+        return {"hosts": await asyncio.to_thread(service.current_hosts)}
 
     @router.post("/hosts")
     async def upsert_host(
@@ -72,15 +73,16 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
         identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
     ):
         try:
-            # Drop a null id so the service treats this as a create (it requires
-            # id to be absent, not None, for new hosts). Runs off the event loop
-            # because it persists to Vault (blocking I/O).
+            # Without an id the service upserts by name. Runs off the event
+            # loop because it writes the shared DB table (blocking I/O).
             host = await asyncio.to_thread(
                 service.upsert_host, payload.model_dump(exclude_none=True)
             )
             return {"host": host, "hosts": service.list_hosts()}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:  # database not connected
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @router.post("/hosts/sync")
     async def sync_hosts(
@@ -92,6 +94,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
         Intended for automated callers (IaC Orchestrator, Ansible, scripts).
         Hosts present in the current list but absent from ``payload.hosts``
         are left untouched — unlike ``/hosts/set`` which replaces everything.
+        New hosts get ``source: "iac"``.
         """
         try:
             stats = await asyncio.to_thread(
@@ -101,6 +104,8 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
             return {"ok": True, **stats, "hosts": service.list_hosts()}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @router.post("/hosts/set")
     async def set_hosts(
@@ -114,13 +119,19 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
             return {"hosts": hosts}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @router.delete("/hosts/{host_id}")
     async def delete_host(
         host_id: int,
         identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
     ):
-        if not await asyncio.to_thread(service.delete_host, host_id):
+        try:
+            removed = await asyncio.to_thread(service.delete_host, host_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if not removed:
             raise HTTPException(status_code=404, detail=f"Unknown host id: {host_id}")
         return {"ok": True, "hosts": service.list_hosts()}
 

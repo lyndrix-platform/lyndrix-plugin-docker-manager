@@ -1,15 +1,35 @@
-"""Service layer for Docker Manager."""
+"""Service layer for Docker Manager (host registry + Docker proxy runtime)."""
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import requests
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
+
+from ..model import database as db
+from ..model.models import HOST_SOURCES, DockerHostRecord
+
+# Cluster-wide "the host table changed, re-read it" (relayed copies carry _origin).
+EVENT_HOSTS_UPDATED = "docker_manager:hosts_updated"
+# 1.1 local topic with the full host list, kept for existing subscribers.
+EVENT_HOSTS_UPDATED_LOCAL = "docker_manager:hosts:updated"
+
+# Legacy (<= 1.1) Vault storage and the marker written after the one-time import.
+LEGACY_VAULT_KEY = "configured_hosts"
+LEGACY_MARKER_KEY = "configured_hosts_migrated_at"
+
+CACHE_TTL_SECONDS = 30.0
+DEFAULT_PROBE_INTERVAL = 60
+MIN_PROBE_INTERVAL = 10
 
 # Hostnames per RFC 1123 (labels of [a-z0-9-], no leading/trailing hyphen).
 _HOSTNAME_RE = re.compile(
@@ -46,19 +66,51 @@ def _validate_host_target(value: str) -> None:
 
 
 class DockerManagerService:
+    """Host registry (DB-backed, cluster-safe) + Docker proxy runtime actions.
+
+    Since 1.2.0 the ``docker_manager_hosts`` table is the source of truth so every
+    core instance behind the load balancer sees the same hosts and ids. ``_hosts``
+    is a per-instance cache, refreshed after own writes, on the cluster event
+    ``docker_manager:hosts_updated`` from a peer and after ``CACHE_TTL_SECONDS``.
+    """
+
     def __init__(self) -> None:
         self._ctx = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.RLock()
         self._hosts: List[Dict[str, Any]] = []
+        self._loaded_at = 0.0  # monotonic time of the last DB read; 0 = never
+        self._schema_ready = False
+        self._vault_ready = False
+        self._legacy_checked = False
+        self._bootstrap_lock: asyncio.Lock | None = None
+        self._probe_task: asyncio.Task | None = None
+        self._probe_interval = DEFAULT_PROBE_INTERVAL
 
     @property
     def is_ready(self) -> bool:
         return self._ctx is not None
 
+    @property
+    def is_prober(self) -> bool:
+        return self._probe_task is not None and not self._probe_task.done()
+
     def set_context(self, ctx) -> None:
         self._ctx = ctx
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
 
-    def _normalize_host(self, raw_host: Dict[str, Any], fallback_id: int) -> Dict[str, Any]:
+    def _log(self, level: str, message: str) -> None:
+        if self._ctx is not None:
+            getattr(self._ctx.log, level)(message)
+
+    # ── Normalisation ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_host(raw_host: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate one host payload; ``id`` is kept only when supplied."""
         if not isinstance(raw_host, dict):
             raise ValueError("Host must be an object")
 
@@ -66,6 +118,8 @@ class DockerManagerService:
         ip = str(raw_host.get("ip", "")).strip()
         if not name or not ip:
             raise ValueError("Host requires 'name' and 'ip'")
+        if len(name) > 255:
+            raise ValueError("Host name too long (max 255)")
         # Validate the target to reduce the SSRF surface (operator-supplied value
         # that the core process will issue HTTP requests to).
         _validate_host_target(ip)
@@ -74,183 +128,580 @@ class DockerManagerService:
             port = int(raw_host.get("port", 2375) or 2375)
         except Exception as exc:
             raise ValueError("Port must be numeric") from exc
+        if not 0 < port < 65536:
+            raise ValueError("Port out of range")
 
         scheme = str(raw_host.get("scheme", "http") or "http").strip().lower()
         if scheme not in {"http", "https"}:
             scheme = "http"
 
-        host_id = raw_host.get("id", fallback_id)
-        try:
-            host_id = int(host_id)
-        except Exception as exc:
-            raise ValueError("Host id must be numeric") from exc
+        host: Dict[str, Any] = {"name": name, "ip": ip, "port": port, "scheme": scheme}
+        if raw_host.get("id") is not None:
+            try:
+                host["id"] = int(raw_host["id"])
+            except Exception as exc:
+                raise ValueError("Host id must be numeric") from exc
+        source = raw_host.get("source")
+        if source is not None:
+            if source not in HOST_SOURCES:
+                raise ValueError(f"source must be one of {', '.join(HOST_SOURCES)}")
+            host["source"] = source
+        if raw_host.get("ci_id"):
+            host["ci_id"] = str(raw_host["ci_id"])[:36]
+        if isinstance(raw_host.get("labels"), dict):
+            host["labels"] = raw_host["labels"]
+        return host
 
+    @staticmethod
+    def _row_to_dict(row: DockerHostRecord) -> Dict[str, Any]:
+        """REST/JSON shape: the 1.1 keys (id/name/ip/port/scheme) + additive fields."""
         return {
-            "id": host_id,
-            "name": name,
-            "ip": ip,
-            "port": port,
-            "scheme": scheme,
+            "id": int(row.id),
+            "name": row.name,
+            "ip": row.address,
+            "port": int(row.port or 2375),
+            "scheme": row.scheme or "http",
+            "source": row.source or "manual",
+            "ci_id": row.ci_id,
+            "labels": row.labels or {},
+            "reachable": row.reachable,
+            "checked_at": row.checked_at.isoformat() if row.checked_at else None,
+            "check_error": row.check_error,
         }
 
-    def _emit_hosts_updated(self) -> None:
-        if not self._ctx:
+    @staticmethod
+    def _apply(row: DockerHostRecord, host: Dict[str, Any]) -> None:
+        row.name = host["name"]
+        row.address = host["ip"]
+        row.port = host["port"]
+        row.scheme = host["scheme"]
+        if "source" in host:
+            row.source = host["source"]
+        if "ci_id" in host:
+            row.ci_id = host["ci_id"]
+        if "labels" in host:
+            row.labels = host["labels"]
+
+    def _new_row(self, host: Dict[str, Any], *, source: str = "manual") -> DockerHostRecord:
+        row = DockerHostRecord(source=host.get("source", source), labels={})
+        if host.get("id") is not None:
+            row.id = host["id"]
+        self._apply(row, host)
+        return row
+
+    # ── Events ───────────────────────────────────────────────────────────────
+
+    def _emit(self, topic: str, payload: Dict[str, Any], *, cluster: bool = False) -> None:
+        """Emit on the event loop — the bus schedules tasks, so worker threads
+        (``asyncio.to_thread`` writers) hand the call over thread-safely."""
+        ctx = self._ctx
+        if ctx is None:
             return
-        self._ctx.emit("docker_manager:hosts:updated", {"hosts": self.list_hosts()})
 
-    def load_hosts_from_vault(self) -> int:
-        if not self._ctx:
-            return 0
-
-        stored_hosts = self._ctx.get_secret("configured_hosts")
-        if not stored_hosts:
-            with self._lock:
-                self._hosts = []
-            return 0
+        def _do() -> None:
+            try:
+                if cluster:
+                    try:
+                        ctx.emit(topic, payload, cluster=True)
+                    except TypeError:  # core < 1.7: no cluster bridge
+                        ctx.emit(topic, payload)
+                else:
+                    ctx.emit(topic, payload)
+            except Exception as exc:
+                self._log("warning", f"Docker Manager: emit {topic} failed: {exc}")
 
         try:
-            parsed = json.loads(stored_hosts)
-            if not isinstance(parsed, list):
-                raise ValueError("configured_hosts must be a list")
-            self.replace_hosts(parsed, persist=False, emit=False)
+            asyncio.get_running_loop()
+            in_loop = True
+        except RuntimeError:
+            in_loop = False
+        loop = self._loop
+        if in_loop or loop is None or loop.is_closed():
+            _do()
+        else:
+            loop.call_soon_threadsafe(_do)
+
+    def _after_change(self, reason: str, ids: List[int]) -> None:
+        """Refresh this instance's cache and tell every instance to do the same."""
+        try:
+            self.load_hosts()
         except Exception as exc:
-            self._ctx.log.error(f"Docker Manager: failed to parse host data from Vault: {exc}")
-            with self._lock:
-                self._hosts = []
+            self._log("warning", f"Docker Manager: cache refresh after {reason} failed: {exc}")
+            self.invalidate_cache()
+        hosts = self.list_hosts()
+        self._emit(EVENT_HOSTS_UPDATED_LOCAL, {"hosts": hosts})
+        self._emit(EVENT_HOSTS_UPDATED, {"reason": reason, "ids": sorted(ids)}, cluster=True)
 
-        return len(self._hosts)
+    async def on_hosts_updated(self, payload: Dict[str, Any] | None) -> None:
+        """Cluster event handler: a peer changed hosts → re-read the table."""
+        if not isinstance(payload, dict) or not payload.get("_origin"):
+            return  # own emit — the cache is already fresh
+        self.invalidate_cache()
+        try:
+            await asyncio.to_thread(self.load_hosts)
+        except Exception as exc:
+            self._log("warning", f"Docker Manager: reload after peer change failed: {exc}")
+            return
+        self._emit(EVENT_HOSTS_UPDATED_LOCAL, {"hosts": self.list_hosts()})
 
-    def save_hosts_to_vault(self) -> bool:
-        if not self._ctx:
-            return False
+    # ── Bootstrap: schema, legacy Vault import, cache ───────────────────────
+
+    def _require_db(self) -> None:
+        if not db.is_connected():
+            raise RuntimeError("Database not connected")
+        if not self._schema_ready:
+            db.ensure_tables()
+            self._schema_ready = True
+
+    def mark_vault_ready(self) -> None:
+        self._vault_ready = True
+
+    async def ensure_ready(self) -> None:
+        """Tables → one-time legacy import → cache. Safe to call repeatedly
+        (setup when the DB is already up, ``db:connected``, ``vault:ready_for_data``)."""
+        if not db.is_connected():
+            return
+        if self._bootstrap_lock is None:
+            self._bootstrap_lock = asyncio.Lock()
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+        async with self._bootstrap_lock:
+            try:
+                await asyncio.to_thread(self._require_db)
+                if self._vault_ready and not self._legacy_checked:
+                    imported = await asyncio.to_thread(self.import_legacy_hosts)
+                    if imported:
+                        self._log("info", f"Docker Manager: imported {imported} host(s) from Vault")
+                count = len(await asyncio.to_thread(self.load_hosts))
+                self._log("info", f"Docker Manager: {count} host(s) loaded from the database")
+            except Exception as exc:
+                self._log("error", f"Docker Manager: bootstrap failed: {exc}")
+
+    def import_legacy_hosts(self) -> int:
+        """Import the 1.1 Vault list ``configured_hosts`` into the table, once.
+
+        Ids are kept when free; a taken or invalid id is re-assigned and logged.
+        Names already in the table are skipped (the table wins). A Vault marker
+        stops later boots from resurrecting hosts deleted after the import.
+        Runs under the bootstrap advisory lock so two booting instances cannot
+        import twice. Blocking.
+        """
+        ctx = self._ctx
+        if ctx is None or not self._vault_ready:
+            return 0
+        self._require_db()
+        with db.bootstrap_lock():
+            if ctx.get_secret(LEGACY_MARKER_KEY):
+                self._legacy_checked = True
+                return 0
+            raw = ctx.get_secret(LEGACY_VAULT_KEY)
+            if not raw:
+                self._log("info", "Docker Manager: no legacy Vault host list to import")
+                self._legacy_checked = True
+                return 0
+            try:
+                parsed = json.loads(raw)
+                if not isinstance(parsed, list):
+                    raise ValueError("configured_hosts must be a list")
+            except Exception as exc:
+                self._log("error", f"Docker Manager: legacy Vault host list unreadable: {exc}")
+                self._legacy_checked = True
+                return 0
+
+            imported = 0
+            with db.get_session() as s:
+                taken_ids = {r for (r,) in s.query(DockerHostRecord.id).all()}
+                taken_names = {r for (r,) in s.query(DockerHostRecord.name).all()}
+                for raw_host in parsed:
+                    try:
+                        host = self._normalize_host(raw_host)
+                    except ValueError as exc:
+                        self._log("warning", f"Docker Manager: legacy host skipped ({exc}): {raw_host!r}")
+                        continue
+                    if host["name"] in taken_names:
+                        self._log("info", f"Docker Manager: legacy host '{host['name']}' already in the table")
+                        continue
+                    old_id = host.get("id")
+                    if old_id is None or old_id <= 0 or old_id in taken_ids:
+                        host.pop("id", None)
+                        self._log(
+                            "warning",
+                            f"Docker Manager: legacy host '{host['name']}' (id {old_id}) gets a new id",
+                        )
+                    row = self._new_row(host)
+                    s.add(row)
+                    s.flush()
+                    taken_ids.add(int(row.id))
+                    taken_names.add(row.name)
+                    imported += 1
+                s.commit()
+            ctx.set_secret(LEGACY_MARKER_KEY, datetime.now(timezone.utc).isoformat())
+        self._log("info", f"Docker Manager: legacy Vault host list checked ({imported} imported)")
+        self._legacy_checked = True
+        if imported:
+            self._after_change("legacy_import", [])
+        return imported
+
+    # ── Reads (cache) ────────────────────────────────────────────────────────
+
+    def invalidate_cache(self) -> None:
         with self._lock:
-            payload = json.dumps(self._hosts)
-        return bool(self._ctx.set_secret("configured_hosts", payload))
+            self._loaded_at = 0.0
+
+    def load_hosts(self) -> List[Dict[str, Any]]:
+        """Re-read the table into the cache (blocking — call via ``to_thread``)."""
+        self._require_db()
+        with db.get_session() as s:
+            rows = [self._row_to_dict(r) for r in s.query(DockerHostRecord).order_by(DockerHostRecord.id).all()]
+        with self._lock:
+            self._hosts = rows
+            self._loaded_at = time.monotonic()
+        return self.list_hosts()
 
     def list_hosts(self) -> List[Dict[str, Any]]:
+        """Cached host list — never touches the DB (safe on the event loop)."""
         with self._lock:
             return sorted([dict(host) for host in self._hosts], key=lambda h: h["id"])
 
-    def replace_hosts(self, hosts: List[Dict[str, Any]], *, persist: bool = True, emit: bool = True) -> List[Dict[str, Any]]:
-        if not isinstance(hosts, list):
-            raise ValueError("hosts must be a list")
-
-        normalized: List[Dict[str, Any]] = []
-        next_id = 1
-        for raw_host in hosts:
-            host = self._normalize_host(raw_host, fallback_id=next_id)
-            next_id = max(next_id, int(host["id"]) + 1)
-            normalized.append(host)
-
-        by_id = {host["id"]: host for host in normalized}
-        final_hosts = sorted(by_id.values(), key=lambda h: h["id"])
-
+    def current_hosts(self) -> List[Dict[str, Any]]:
+        """Cache, re-read when older than ``CACHE_TTL_SECONDS`` (blocking)."""
         with self._lock:
-            self._hosts = final_hosts
-
-        if persist:
-            self.save_hosts_to_vault()
-        if emit:
-            self._emit_hosts_updated()
-
+            stale = time.monotonic() - self._loaded_at > CACHE_TTL_SECONDS
+        if stale and db.is_connected():
+            try:
+                return self.load_hosts()
+            except Exception as exc:
+                self._log("warning", f"Docker Manager: host reload failed, serving cache: {exc}")
         return self.list_hosts()
 
-    def upsert_host(self, host_payload: Dict[str, Any], *, persist: bool = True, emit: bool = True) -> Dict[str, Any]:
+    def _resolve_host(self, host_id: int) -> Dict[str, Any]:
+        """Host by id; a cache miss re-reads the table (a peer may have added it)."""
+        for attempt in range(2):
+            with self._lock:
+                for host in self._hosts:
+                    if int(host["id"]) == int(host_id):
+                        return dict(host)
+            if attempt == 0 and db.is_connected():
+                self.load_hosts()
+        raise ValueError(f"Unknown host id: {host_id}")
+
+    # ── Writes (DB, per-row, retried) ────────────────────────────────────────
+
+    def _upsert_tx(self, host: Dict[str, Any]) -> Dict[str, Any]:
+        with db.get_session() as s:
+            row = s.get(DockerHostRecord, host["id"]) if host.get("id") is not None else None
+            by_name = s.query(DockerHostRecord).filter(DockerHostRecord.name == host["name"]).one_or_none()
+            if row is not None:
+                if by_name is not None and by_name.id != row.id:
+                    raise ValueError(f"Host name already in use: {host['name']}")
+                self._apply(row, host)
+            elif host.get("id") is not None:
+                # Explicit id that does not exist (bus/legacy callers): create it.
+                if by_name is not None:
+                    raise ValueError(f"Host name already in use: {host['name']}")
+                row = self._new_row(host)
+                s.add(row)
+            elif by_name is not None:
+                row = by_name  # upsert by name
+                self._apply(row, host)
+            else:
+                row = self._new_row(host)
+                s.add(row)
+            s.commit()
+            s.refresh(row)
+            return self._row_to_dict(row)
+
+    def upsert_host(self, host_payload: Dict[str, Any], *, emit: bool = True) -> Dict[str, Any]:
+        """Create or update one host (by id when given, else by name). Blocking."""
         if not isinstance(host_payload, dict):
             raise ValueError("host payload must be an object")
-
-        with self._lock:
-            existing = list(self._hosts)
-            next_id = max([h["id"] for h in existing] + [0]) + 1
-
-            raw_id = host_payload.get("id")
-            if raw_id is None:
-                host = self._normalize_host(host_payload, fallback_id=next_id)
-                existing.append(host)
-            else:
-                host_id = int(raw_id)
-                host = self._normalize_host(host_payload, fallback_id=host_id)
-                updated = False
-                for idx, item in enumerate(existing):
-                    if item["id"] == host_id:
-                        existing[idx] = host
-                        updated = True
-                        break
-                if not updated:
-                    existing.append(host)
-
-            self._hosts = sorted(existing, key=lambda h: h["id"])
-
-        if persist:
-            self.save_hosts_to_vault()
+        host = self._normalize_host(host_payload)
+        self._require_db()
+        try:
+            result = db.retry_write(lambda: self._upsert_tx(host), integrity=True)
+        except IntegrityError as exc:
+            raise ValueError(f"Host conflicts with an existing host: {host['name']}") from exc
         if emit:
-            self._emit_hosts_updated()
+            self._after_change("upsert", [result["id"]])
+        else:
+            self.invalidate_cache()
+        return result
 
-        return host
+    def _replace_tx(self, hosts: List[Dict[str, Any]]) -> List[int]:
+        with db.get_session() as s:
+            rows = s.query(DockerHostRecord).all()
+            by_id = {r.id: r for r in rows}
+            by_name = {r.name: r for r in rows}
+            plan: List[tuple[Dict[str, Any], DockerHostRecord | None]] = []
+            keep: set[int] = set()
+            for host in hosts:
+                row = by_id.get(host["id"]) if host.get("id") is not None else by_name.get(host["name"])
+                plan.append((host, row))
+                if row is not None:
+                    keep.add(row.id)
+            changed = [r.id for r in rows if r.id not in keep]
+            for row in rows:
+                if row.id not in keep:
+                    s.delete(row)
+            s.flush()
+            for host, row in plan:
+                if row is None:
+                    row = self._new_row(host)
+                    s.add(row)
+                else:
+                    self._apply(row, host)
+                s.flush()
+                changed.append(int(row.id))
+            s.commit()
+            return changed
+
+    def replace_hosts(self, hosts: List[Dict[str, Any]], *, emit: bool = True) -> List[Dict[str, Any]]:
+        """Make the table equal ``hosts`` (matched by id, else name). Blocking."""
+        if not isinstance(hosts, list):
+            raise ValueError("hosts must be a list")
+        by_key: Dict[Any, Dict[str, Any]] = {}
+        for raw in hosts:
+            host = self._normalize_host(raw)
+            by_key[host.get("id", f"name:{host['name']}")] = host  # last one wins, as in 1.1
+        normalized = list(by_key.values())
+        names = [h["name"] for h in normalized]
+        if len(names) != len(set(names)):
+            raise ValueError("Host names must be unique")
+        self._require_db()
+        try:
+            ids = db.retry_write(lambda: self._replace_tx(normalized))
+        except IntegrityError as exc:
+            raise ValueError(f"Host list conflicts with existing hosts: {exc.orig}") from exc
+        if emit:
+            self._after_change("replace", ids)
+        else:
+            self.invalidate_cache()
+        return self.list_hosts() if emit else self.load_hosts()
+
+    def _sync_one_tx(self, host: Dict[str, Any]) -> tuple[str, int]:
+        with db.get_session() as s:
+            row = s.query(DockerHostRecord).filter(DockerHostRecord.name == host["name"]).one_or_none()
+            if row is None:
+                row = self._new_row({**host, "source": host.get("source", "iac")})
+                s.add(row)
+                outcome = "added"
+            else:
+                # Connection fields (and the CI id, when known) come from the
+                # inventory; id, source and labels of the existing row are kept.
+                row.address = host["ip"]
+                row.port = host["port"]
+                row.scheme = host["scheme"]
+                if host.get("ci_id"):
+                    row.ci_id = host["ci_id"]
+                outcome = "updated"
+            s.commit()
+            return outcome, int(row.id)
 
     def sync_orchestrator_hosts(self, incoming: list[dict]) -> dict:
-        """Upsert docker hosts by name without removing unrecognized entries.
+        """Upsert hosts by name without removing unrecognized entries. Blocking.
 
-        Intended for automated callers (IaC Orchestrator) that know about a
-        subset of hosts. Existing hosts with names not in ``incoming`` are left
-        untouched so manually-added hosts survive inventory refreshes.
+        Intended for automated callers (IaC Orchestrator). One short transaction
+        per host, retried on 1020/1205/1213 and on a lost insert race, so two
+        instances syncing the same inventory converge instead of colliding.
 
-        Returns a stats dict: ``{"added": n, "updated": n, "total": n}``.
+        Returns ``{"added": n, "updated": n, "total": n}``.
         """
-        with self._lock:
-            by_name: dict[str, dict] = {h["name"]: dict(h) for h in self._hosts}
-            next_id = max((h["id"] for h in by_name.values()), default=0) + 1
-            added = updated = 0
+        self._require_db()
+        added = updated = 0
+        ids: List[int] = []
+        for raw in incoming or []:
+            if not isinstance(raw, dict) or not str(raw.get("name") or "").strip():
+                continue
+            try:
+                host = self._normalize_host({**raw, "id": None})
+            except ValueError as exc:
+                self._log("warning", f"Docker Manager: sync skipped {raw.get('name')!r}: {exc}")
+                continue
+            host.pop("id", None)
+            try:
+                outcome, host_id = db.retry_write(lambda h=host: self._sync_one_tx(h), integrity=True)
+            except Exception as exc:
+                self._log("error", f"Docker Manager: sync of '{host['name']}' failed: {exc}")
+                continue
+            ids.append(host_id)
+            if outcome == "added":
+                added += 1
+            else:
+                updated += 1
+        self._after_change("sync", ids)
+        return {"added": added, "updated": updated, "total": len(self.list_hosts())}
 
-            for raw in incoming:
-                name = str(raw.get("name") or "").strip()
-                if not name:
-                    continue
-                if name in by_name:
-                    # Preserve id; overwrite connection fields from the inventory.
-                    merged = {
-                        **by_name[name],
-                        **{k: raw[k] for k in ("ip", "port", "scheme") if k in raw},
-                    }
-                    try:
-                        by_name[name] = self._normalize_host(merged, fallback_id=by_name[name]["id"])
-                        updated += 1
-                    except ValueError:
-                        continue
-                else:
-                    try:
-                        host = self._normalize_host({**raw, "id": next_id}, fallback_id=next_id)
-                        by_name[name] = host
-                        next_id += 1
-                        added += 1
-                    except ValueError:
-                        continue
+    def _delete_tx(self, host_id: int) -> bool:
+        with db.get_session() as s:
+            row = s.get(DockerHostRecord, int(host_id))
+            if row is None:
+                return False
+            s.delete(row)
+            s.commit()
+            return True
 
-            self._hosts = sorted(by_name.values(), key=lambda h: h["id"])
-
-        self.save_hosts_to_vault()
-        self._emit_hosts_updated()
-        return {"added": added, "updated": updated, "total": len(self._hosts)}
-
-    def delete_host(self, host_id: int, *, persist: bool = True, emit: bool = True) -> bool:
-        with self._lock:
-            before = len(self._hosts)
-            self._hosts = [h for h in self._hosts if int(h["id"]) != int(host_id)]
-            changed = len(self._hosts) != before
-
-        if changed and persist:
-            self.save_hosts_to_vault()
+    def delete_host(self, host_id: int, *, emit: bool = True) -> bool:
+        self._require_db()
+        changed = db.retry_write(lambda: self._delete_tx(host_id))
         if changed and emit:
-            self._emit_hosts_updated()
-
+            self._after_change("delete", [int(host_id)])
+        elif changed:
+            self.invalidate_cache()
         return changed
 
-    def _resolve_host(self, host_id: int) -> Dict[str, Any]:
-        with self._lock:
-            for host in self._hosts:
-                if int(host["id"]) == int(host_id):
-                    return dict(host)
-        raise ValueError(f"Unknown host id: {host_id}")
+    # ── IaC inventory ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def inventory_docker_hosts(payload: Any) -> List[Dict[str, Any]]:
+        """Pick the Docker hosts out of a generic ``iac:inventory_updated`` payload.
+
+        Filtering lives here, not in the orchestrator, so both plugins stay
+        independent — the orchestrator broadcasts generic host data.
+        """
+        hosts = (payload.get("hosts") or []) if isinstance(payload, dict) else []
+        result = []
+        for h in hosts:
+            if not isinstance(h, dict) or not h.get("ip") or not h.get("name"):
+                continue
+            if "docker_hosts" in (h.get("groups") or []) or "docker" in (h.get("baseline_roles") or []):
+                entry = {"name": h["name"], "ip": h["ip"], "port": 2375, "scheme": "http", "source": "iac"}
+                if h.get("ci_id"):
+                    entry["ci_id"] = h["ci_id"]
+                result.append(entry)
+        return result
+
+    async def on_iac_inventory(self, payload: Any) -> Dict[str, int] | None:
+        """``iac:inventory_updated`` handler. The orchestrator emits it on the
+        runner instance; that instance writes the table and the cluster event
+        refreshes the peers. A relayed copy (``_origin``) is ignored so the
+        sync never runs N times."""
+        if isinstance(payload, dict) and payload.get("_origin"):
+            return None
+        docker_hosts = self.inventory_docker_hosts(payload)
+        if not docker_hosts:
+            return None
+        # Let a pending legacy Vault import finish first so imported hosts keep
+        # their 1.1 ids instead of losing them to freshly synced rows.
+        if self._vault_ready and not self._legacy_checked:
+            await self.ensure_ready()
+        elif self._bootstrap_lock is not None and self._bootstrap_lock.locked():
+            async with self._bootstrap_lock:
+                pass
+        return await asyncio.to_thread(self.sync_orchestrator_hosts, docker_hosts)
+
+    # ── Settings ─────────────────────────────────────────────────────────────
+
+    def reload_settings(self) -> None:
+        """Re-read operator settings (blocking Vault read — use ``to_thread``)."""
+        get_setting = getattr(self._ctx, "get_setting", None)
+        if not callable(get_setting):
+            return
+        try:
+            value = int(get_setting("probe_interval_seconds", DEFAULT_PROBE_INTERVAL) or DEFAULT_PROBE_INTERVAL)
+        except (TypeError, ValueError):
+            value = DEFAULT_PROBE_INTERVAL
+        self._probe_interval = max(MIN_PROBE_INTERVAL, value)
+
+    # ── Leased reachability probe ────────────────────────────────────────────
+
+    async def start_prober(self) -> None:
+        """``on_lease("docker_manager:prober")`` acquired → probe in the background."""
+        if self.is_prober:
+            return
+        create_task = getattr(self._ctx, "create_task", None) or asyncio.create_task
+        self._probe_task = create_task(self._probe_loop(), name="docker_manager:prober")
+        self._log("info", "Docker Manager: reachability prober started")
+
+    async def stop_prober(self) -> None:
+        """Lease lost / plugin unloaded → stop probing at once."""
+        task, self._probe_task = self._probe_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._log("info", "Docker Manager: reachability prober stopped")
+
+    async def _probe_loop(self) -> None:
+        while True:
+            try:
+                await self.probe_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # one failed sweep never kills the prober
+                self._log("warning", f"Docker Manager: probe sweep failed: {exc}")
+            await asyncio.sleep(self._probe_interval)
+
+    def _probe_host(self, host: Dict[str, Any]) -> tuple[int, bool, str | None]:
+        try:
+            self.fetch_single_host(host, include_stopped=False)
+            return int(host["id"]), True, None
+        except Exception as exc:
+            return int(host["id"]), False, str(exc)[:1000]
+
+    async def probe_once(self) -> List[tuple[int, bool, str | None]]:
+        """Probe every host once and persist reachable/checked_at/check_error."""
+        if not db.is_connected():
+            return []
+        hosts = await asyncio.to_thread(self.load_hosts)
+        if not hosts:
+            return []
+        results = await asyncio.gather(*(asyncio.to_thread(self._probe_host, h) for h in hosts))
+        await asyncio.to_thread(self._store_probe_results, list(results))
+        return list(results)
+
+    def _store_probe_results(self, results: List[tuple[int, bool, str | None]]) -> None:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for host_id, ok, error in results:
+            def _tx(host_id=host_id, ok=ok, error=error) -> None:
+                with db.get_session() as s:
+                    s.execute(
+                        update(DockerHostRecord)
+                        .where(DockerHostRecord.id == host_id)
+                        # updated_at tracks config edits, not probe results.
+                        .values(reachable=ok, checked_at=now, check_error=error,
+                                updated_at=DockerHostRecord.updated_at)
+                    )
+                    s.commit()
+
+            try:
+                db.retry_write(_tx)
+            except Exception as exc:  # a lost write only delays this host's status
+                self._log("warning", f"Docker Manager: storing probe result of host {host_id} failed: {exc}")
+
+    # ── Health (reads the probe results; never probes) ───────────────────────
+
+    def health_snapshot(self) -> Dict[str, Any]:
+        """One small query over the probe columns. Blocking.
+
+        Unreachable proxies make the plugin ``degraded`` (never ``error``): the
+        plugin itself works, and reachability is judged by the prober instance,
+        not by whichever instance the dashboard happened to ask.
+        """
+        if not db.is_connected():
+            return {"status": "degraded", "details": {"reason": "db_unavailable"}}
+        self._require_db()
+        with db.get_session() as s:
+            rows = s.query(
+                DockerHostRecord.name, DockerHostRecord.reachable,
+                DockerHostRecord.checked_at, DockerHostRecord.check_error,
+            ).all()
+        details: Dict[str, Any] = {"hosts_total": len(rows), "prober": self.is_prober}
+        if not rows:
+            return {"status": "degraded", "details": {**details, "reason": "no_hosts_configured"}}
+        unreachable = {name: err for name, ok, _, err in rows if ok is False}
+        checked = [at for _, ok, at, _ in rows if at is not None]
+        details.update(
+            hosts_reachable=sum(1 for _, ok, _, _ in rows if ok is True),
+            hosts_unchecked=sum(1 for _, ok, _, _ in rows if ok is None),
+            unreachable=unreachable,
+            last_checked_at=max(checked).isoformat() if checked else None,
+        )
+        if unreachable:
+            reason = "all_hosts_unreachable" if len(unreachable) == len(rows) else "some_hosts_unreachable"
+            return {"status": "degraded", "details": {**details, "reason": reason}}
+        return {"status": "ok", "details": details}
 
     @staticmethod
     def _base_url(host: Dict[str, Any]) -> str:
@@ -276,7 +727,7 @@ class DockerManagerService:
         return [self._container_to_row(item) for item in response.json()]
 
     def fetch_all_containers_parallel(self, *, include_stopped: bool = True) -> Dict[str, Any]:
-        hosts = self.list_hosts()
+        hosts = self.current_hosts()
         if not hosts:
             return {}
 
@@ -422,17 +873,17 @@ class DockerManagerService:
                         f"Docker API stop/kill fallback failed {kill_resp.status_code}: {kill_resp.text[:300]}"
                     )
 
-        if self._ctx:
-            self._ctx.emit(
-                "docker_manager:container:action",
-                {
-                    "host_id": host_id,
-                    "container_id": container_id,
-                    "container_ref": used_ref,
-                    "action": action,
-                    "status_code": response.status_code,
-                },
-            )
+        # Runs in a worker thread (REST via to_thread) — _emit hands it to the loop.
+        self._emit(
+            "docker_manager:container:action",
+            {
+                "host_id": host_id,
+                "container_id": container_id,
+                "container_ref": used_ref,
+                "action": action,
+                "status_code": response.status_code,
+            },
+        )
 
         return {
             "ok": True,
