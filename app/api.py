@@ -78,6 +78,20 @@ class ContainerActionPayload(BaseModel):
     action: Literal["start", "stop", "restart"]
 
 
+# Host fields that describe the internal setup rather than status: free-form
+# operator labels, the raw connection error (target URL, resolver and TLS
+# details) and the CA bundle path. Only callers who manage hosts see them.
+_HOST_INTERNAL_FIELDS = ("labels", "check_error", "tls_ca_path")
+_GENERIC_HOST_ERROR = "Host unreachable"
+
+
+def _host_view(host: dict, identity: ApiIdentity) -> dict:
+    """A host as the caller may see it (viewer level: status only)."""
+    if identity.allows(PERM_HOSTS):
+        return host
+    return {key: value for key, value in host.items() if key not in _HOST_INTERNAL_FIELDS}
+
+
 def build_plugin_router(service: DockerManagerService) -> APIRouter:
     """The single Docker Manager router — core mounts it at /api/plugins/<id>/."""
     router = APIRouter(tags=["Docker Manager"])
@@ -93,7 +107,8 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.get("/hosts")
     async def list_hosts(identity: ApiIdentity = Depends(require_permission(PERM_READ))):
         # Cached per instance; re-read from the shared table when stale.
-        return {"hosts": await asyncio.to_thread(service.current_hosts)}
+        hosts = await asyncio.to_thread(service.current_hosts)
+        return {"hosts": [_host_view(host, identity) for host in hosts]}
 
     @router.post("/hosts")
     async def upsert_host(
@@ -175,9 +190,18 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     ):
         # fetch_all_containers_parallel blocks on synchronous network I/O
         # (ThreadPoolExecutor + requests); keep it off the shared event loop.
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             service.fetch_all_containers_parallel, include_stopped=include_stopped
         )
+        if identity.allows(PERM_HOSTS):
+            return result
+        # Viewer level: same shape, but no internal host details and no raw
+        # exception text (it quotes the target and resolver/TLS internals).
+        return {
+            key: {**entry, "host": _host_view(entry["host"], identity),
+                  "error": _GENERIC_HOST_ERROR if entry.get("error") else None}
+            for key, entry in result.items()
+        }
 
     @router.post("/containers/action")
     async def container_action(

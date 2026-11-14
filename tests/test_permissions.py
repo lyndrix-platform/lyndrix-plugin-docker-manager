@@ -158,3 +158,41 @@ def test_container_rows_expose_status_fields_only():
         "NetworkSettings": {}, "Ports": [],
     })
     assert set(row) == {"id", "raw_id", "name", "image", "state", "status"}
+
+
+def test_viewer_gets_no_internal_host_details(monkeypatch):
+    """labels, check_error, tls_ca_path and raw probe errors need docker:hosts."""
+    host = {"id": 1, "name": "atlas", "ip": "10.1.10.5", "port": 2375, "scheme": "http",
+            "reachable": False, "labels": {"rack": "b2"}, "tls_ca_path": "/data/ca.pem",
+            "check_error": "HTTPConnectionPool(host='10.1.10.5', port=2375): refused"}
+
+    class _Service:
+        def current_hosts(self):
+            return [dict(host)]
+
+        def fetch_all_containers_parallel(self, include_stopped=True):
+            return {"atlas#1": {"host": dict(host), "containers": [], "error": host["check_error"]},
+                    "hydra#2": {"host": {**host, "id": 2, "name": "hydra"}, "containers": [], "error": None}}
+
+    from app import api
+    from core.api import security
+
+    def _get(perms):
+        identity = ApiIdentity(method="session", username="alice", permissions=frozenset(perms))
+        monkeypatch.setattr(security, "authenticate_request", lambda request: identity)
+        app = FastAPI()
+        app.include_router(api.build_plugin_router(_Service()))
+        client = TestClient(app)
+        return client.get("/hosts").json()["hosts"][0], client.get("/containers").json()
+
+    viewer_host, viewer_containers = _get({"api:read"})
+    assert {"labels", "check_error", "tls_ca_path"}.isdisjoint(viewer_host)
+    assert viewer_host["reachable"] is False and viewer_host["name"] == "atlas"
+    entry = viewer_containers["atlas#1"]
+    assert entry["error"] == "Host unreachable" and "check_error" not in entry["host"]
+    assert viewer_containers["hydra#2"]["error"] is None
+    assert "10.1.10.5', port" not in str(viewer_containers)
+
+    admin_host, admin_containers = _get({f"{P}:api:read", f"{P}:docker:hosts"})
+    assert admin_host["labels"] == {"rack": "b2"} and admin_host["check_error"]
+    assert "refused" in admin_containers["atlas#1"]["error"]
