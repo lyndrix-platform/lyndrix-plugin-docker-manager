@@ -13,6 +13,27 @@ export interface DockerHost {
   scheme: string
 }
 
+// What the signed-in user may do beyond reading (GET /capabilities). Each flag
+// maps to one docker:* permission; the backend enforces them, the UI only
+// uses them to hide controls that would answer 403.
+export interface Capabilities {
+  logs: boolean
+  control: boolean
+  hosts: boolean
+  exec: boolean
+}
+
+export const NO_CAPABILITIES: Capabilities = { logs: false, control: false, hosts: false, exec: false }
+
+// Thrown on HTTP 403 so views can show "missing permission" instead of a raw
+// backend detail string.
+export class ForbiddenError extends Error {
+  constructor(detail?: string) {
+    super(detail ?? 'Fehlende Berechtigung')
+    this.name = 'ForbiddenError'
+  }
+}
+
 // In-SPA redirect that the shell's BrowserRouter picks up — NOT a full reload.
 // A hard window.location reload cold-loads the SPA before the dynamic plugin
 // routes are registered, which bounces the user / breaks plugin navigation.
@@ -50,6 +71,14 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new Error('Nicht autorisiert')
   }
 
+  if (res.status === 403) {
+    let detail: string | undefined
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail
+    } catch { /* ignore */ }
+    throw new ForbiddenError(detail)
+  }
+
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -79,6 +108,16 @@ export const pluginApi = {
 // Hosts are served by the plugin's single auth'd router at /api/plugins/<id>/,
 // the same path as containers — one client, one surface.
 export const dockerManagerApi = {
+  // Fails closed: when the lookup itself fails the UI shows no privileged
+  // controls (the backend would reject them anyway).
+  getCapabilities: async (): Promise<Capabilities> => {
+    try {
+      return { ...NO_CAPABILITIES, ...(await pluginApi.get<Partial<Capabilities>>('capabilities')) }
+    } catch {
+      return NO_CAPABILITIES
+    }
+  },
+
   getHosts: () => pluginApi.get<{ hosts: DockerHost[] }>('hosts'),
 
   upsertHost: (host: Omit<DockerHost, 'id'> & { id?: number }) =>

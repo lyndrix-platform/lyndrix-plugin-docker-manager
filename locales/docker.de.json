@@ -1,4 +1,12 @@
 {
   "title": "Docker-Verwaltung",
-  "subtitle": "{{hosts}} Host(s) · {{running}}/{{total}} Container aktiv"
+  "subtitle": "{{hosts}} Host(s) · {{running}}/{{total}} Container aktiv",
+  "error": {
+    "forbidden_control": "Fehlende Berechtigung: Container-Steuerung (docker:control).",
+    "forbidden_hosts": "Fehlende Berechtigung: Host-Registry (docker:hosts)."
+  },
+  "hosts": {
+    "read_only_title": "Nur lesend",
+    "read_only_hint": "Das Ändern von Docker-Hosts erfordert die Berechtigung „Docker Host Registry“ (docker:hosts). Ein Administrator kann die Rolle „Docker Manager Administrator“ vergeben."
+  }
 }

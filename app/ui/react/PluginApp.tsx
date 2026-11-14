@@ -4,8 +4,8 @@ import React, { useState, useEffect, useCallback } from 'react'
 // instance + active language. Strings come from locales/docker.<locale>.json,
 // auto-registered by core and served via the catalog (namespace "docker").
 import { useTranslation } from 'react-i18next'
-import { pluginApi, dockerManagerApi } from './lib/api'
-import type { DockerHost } from './lib/api'
+import { pluginApi, dockerManagerApi, ForbiddenError, NO_CAPABILITIES } from './lib/api'
+import type { Capabilities, DockerHost } from './lib/api'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +55,18 @@ function stateBadgeClass(state: string | null): string {
 function stateLabel(state: string | null): string {
   if (!state) return 'Unbekannt'
   return state.charAt(0).toUpperCase() + state.slice(1)
+}
+
+// Capabilities of the signed-in user; nothing privileged is rendered until the
+// lookup answered (fail closed).
+function useCapabilities(): Capabilities {
+  const [caps, setCaps] = useState<Capabilities>(NO_CAPABILITIES)
+  useEffect(() => {
+    let alive = true
+    void dockerManagerApi.getCapabilities().then((c) => { if (alive) setCaps(c) })
+    return () => { alive = false }
+  }, [])
+  return caps
 }
 
 // ─── Shared sub-components ────────────────────────────────────────────────────
@@ -118,10 +130,13 @@ function DMStyles() {
 function ContainerRow({
   container,
   hostId,
+  canControl,
   onAction,
 }: {
   container: Container
   hostId: number
+  // false → the user lacks docker:control; the row is status-only.
+  canControl: boolean
   onAction: (hostId: number, containerId: string, action: ContainerAction) => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
@@ -154,7 +169,7 @@ function ContainerRow({
       </div>
       <div className="dm-row-actions">
         <StateBadge state={container.state} />
-        {isRunning ? (
+        {!canControl ? null : isRunning ? (
           <>
             <button className="lx-btn lx-btn--secondary lx-btn--sm" disabled={busy} onClick={() => void act('restart')}>
               <MatIcon name="restart_alt" size="var(--lx-icon-sm)" />Restart
@@ -299,6 +314,7 @@ function ContainerView() {
   const [loading, setLoading] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [selectedEntry, setSelectedEntry] = useState<HostEntry | null>(null)
+  const caps = useCapabilities()
 
   const fetchContainers = useCallback(async () => {
     setLoading(true)
@@ -327,7 +343,14 @@ function ContainerView() {
       await pluginApi.post('containers/action', { host_id: hostId, container_id: containerId, action })
       await fetchContainers()
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : `Aktion '${action}' fehlgeschlagen`)
+      if (err instanceof ForbiddenError) {
+        // Permission revoked since the capabilities were loaded.
+        setActionError(t('error.forbidden_control', {
+          defaultValue: 'Missing permission: container control (docker:control).',
+        }))
+      } else {
+        setActionError(err instanceof Error ? err.message : `Aktion '${action}' fehlgeschlagen`)
+      }
     }
   }
 
@@ -356,9 +379,11 @@ function ContainerView() {
           <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={() => void fetchContainers()} disabled={loading}>
             <MatIcon name="refresh" size="var(--lx-icon-sm)" />{loading ? 'Lade…' : 'Aktualisieren'}
           </button>
-          <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={goSettings}>
-            <MatIcon name="settings" size="var(--lx-icon-sm)" />Settings
-          </button>
+          {caps.hosts && (
+            <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={goSettings}>
+              <MatIcon name="settings" size="var(--lx-icon-sm)" />Settings
+            </button>
+          )}
         </div>
       </div>
 
@@ -409,6 +434,7 @@ function ContainerView() {
               key={c.id || c.name}
               container={c}
               hostId={selectedEntry.host.id}
+              canControl={caps.control}
               onAction={handleAction}
             />
           ))}
@@ -451,6 +477,11 @@ function CardHeader({ children }: { children: React.ReactNode }) {
 }
 
 function SettingsView() {
+  const { t } = useTranslation('docker')
+  const caps = useCapabilities()
+  const forbiddenHosts = t('error.forbidden_hosts', {
+    defaultValue: 'Missing permission: host registry (docker:hosts).',
+  })
   const [hosts, setHosts] = useState<DockerHost[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -498,7 +529,8 @@ function SettingsView() {
       cancelEdit()
       setNotice('Host gespeichert.')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Speichern fehlgeschlagen')
+      setError(err instanceof ForbiddenError ? forbiddenHosts
+        : err instanceof Error ? err.message : 'Speichern fehlgeschlagen')
     } finally {
       setBusy(false)
     }
@@ -514,7 +546,8 @@ function SettingsView() {
       if (editId === id) cancelEdit()
       setNotice('Host entfernt.')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Löschen fehlgeschlagen')
+      setError(err instanceof ForbiddenError ? forbiddenHosts
+        : err instanceof Error ? err.message : 'Löschen fehlgeschlagen')
     } finally {
       setBusy(false)
     }
@@ -583,14 +616,14 @@ function SettingsView() {
             return (
               <div
                 key={host.id}
-                onClick={() => startEdit(host)}
+                onClick={() => { if (caps.hosts) startEdit(host) }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   padding: '12px 16px',
                   borderBottom: '1px solid var(--lx-border-soft)',
-                  cursor: 'pointer',
+                  cursor: caps.hosts ? 'pointer' : 'default',
                   background: active ? 'color-mix(in srgb, var(--lx-accent) 8%, transparent)' : 'transparent',
                   borderLeft: active ? '2px solid var(--lx-accent)' : '2px solid transparent',
                   transition: 'background var(--lx-transition-fast) var(--lx-ease)',
@@ -604,20 +637,33 @@ function SettingsView() {
                     {host.scheme}://{host.ip}:{host.port}
                   </div>
                 </div>
-                <button
-                  className="lx-icon-btn lx-icon-btn--danger"
-                  onClick={(e) => { e.stopPropagation(); void deleteHost(host.id) }}
-                  disabled={busy}
-                  title="Löschen"
-                >
-                  <MatIcon name="delete_outline" size="var(--lx-icon-md)" />
-                </button>
+                {caps.hosts && (
+                  <button
+                    className="lx-icon-btn lx-icon-btn--danger"
+                    onClick={(e) => { e.stopPropagation(); void deleteHost(host.id) }}
+                    disabled={busy}
+                    title="Löschen"
+                  >
+                    <MatIcon name="delete_outline" size="var(--lx-icon-md)" />
+                  </button>
+                )}
               </div>
             )
           })}
         </div>
 
-        {/* Add / edit form */}
+        {/* Add / edit form — only with docker:hosts; readers get the list above */}
+        {!caps.hosts && (
+          <div className="lx-card dm-host-form">
+            <CardHeader>{t('hosts.read_only_title', { defaultValue: 'Read-only' })}</CardHeader>
+            <div style={{ padding: 16, fontSize: '0.8125rem', color: 'var(--lx-text-muted)' }}>
+              {t('hosts.read_only_hint', {
+                defaultValue: 'Changing Docker hosts requires the permission "Docker Host Registry" (docker:hosts). Ask an administrator for the Docker Manager Administrator role.',
+              })}
+            </div>
+          </div>
+        )}
+        {caps.hosts && (
         <div className="lx-card dm-host-form">
           <CardHeader>{isEditing ? 'Host bearbeiten' : 'Host hinzufügen'}</CardHeader>
 
@@ -681,6 +727,7 @@ function SettingsView() {
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   )

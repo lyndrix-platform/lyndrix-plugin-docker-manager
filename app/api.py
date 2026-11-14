@@ -2,9 +2,17 @@
 
 A single router is mounted by core under ``/api/plugins/lyndrix.plugin.docker/``
 via ``ctx.register_routes()``. The registry enforces authentication for every
-route automatically; we additionally require ``api:read`` on reads and
-``api:write`` on mutations so a merely-authenticated user cannot start/stop
-containers or edit hosts without the write permission.
+route automatically. Authorization (see ``app/permissions.py`` for the why):
+
+  api:read        list hosts and containers (status only) — every viewer
+  docker:logs     container logs
+  docker:control  start / stop / restart
+  docker:hosts    host registry writes
+  docker:exec     shell snapshot
+
+The four ``docker:*`` permissions get no baseline grant and no global
+``api:read``/``api:write`` fallback, so a merely-authenticated user can look
+but not read logs, control containers or redirect the proxy targets.
 """
 from __future__ import annotations
 
@@ -17,14 +25,16 @@ from pydantic import BaseModel, Field
 from core.api import ApiIdentity, require_permission
 
 from .logic.service import DockerManagerService
-
-# Plugin-scoped permission ids. Gating routes on the fully-qualified
-# plugin:<id>:api:* (rather than bare api:read/api:write) makes the manifest's
-# scoped viewer/operator roles actually unlock routes, while global api:read/
-# api:write holders keep working via the core's one-directional fallback.
-PLUGIN_ID = "lyndrix.plugin.docker"
-PERM_READ = f"plugin:{PLUGIN_ID}:api:read"
-PERM_WRITE = f"plugin:{PLUGIN_ID}:api:write"
+from .permissions import (  # noqa: F401  (PLUGIN_ID/PERM_WRITE re-exported for callers)
+    CAPABILITIES,
+    PERM_CONTROL,
+    PERM_EXEC,
+    PERM_HOSTS,
+    PERM_LOGS,
+    PERM_READ,
+    PERM_WRITE,
+    PLUGIN_ID,
+)
 
 
 class DockerHostPayload(BaseModel):
@@ -61,6 +71,13 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     """The single Docker Manager router — core mounts it at /api/plugins/<id>/."""
     router = APIRouter(tags=["Docker Manager"])
 
+    # ── Capabilities ─────────────────────────────────────────────────────────
+    @router.get("/capabilities")
+    async def capabilities(identity: ApiIdentity = Depends(require_permission(PERM_READ))):
+        """What the caller may do beyond reading — lets a UI hide or disable
+        controls instead of offering buttons that answer 403."""
+        return {name: bool(identity.allows(perm)) for name, perm in CAPABILITIES.items()}
+
     # ── Hosts ────────────────────────────────────────────────────────────────
     @router.get("/hosts")
     async def list_hosts(identity: ApiIdentity = Depends(require_permission(PERM_READ))):
@@ -70,7 +87,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.post("/hosts")
     async def upsert_host(
         payload: DockerHostPayload,
-        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
+        identity: ApiIdentity = Depends(require_permission(PERM_HOSTS)),
     ):
         try:
             # Without an id the service upserts by name. Runs off the event
@@ -87,7 +104,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.post("/hosts/sync")
     async def sync_hosts(
         payload: DockerHostSyncPayload,
-        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
+        identity: ApiIdentity = Depends(require_permission(PERM_HOSTS)),
     ):
         """Upsert hosts by name without removing unrecognized entries.
 
@@ -110,7 +127,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.post("/hosts/set")
     async def set_hosts(
         payload: DockerHostsSetPayload,
-        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
+        identity: ApiIdentity = Depends(require_permission(PERM_HOSTS)),
     ):
         try:
             hosts = await asyncio.to_thread(
@@ -125,7 +142,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.delete("/hosts/{host_id}")
     async def delete_host(
         host_id: int,
-        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
+        identity: ApiIdentity = Depends(require_permission(PERM_HOSTS)),
     ):
         try:
             removed = await asyncio.to_thread(service.delete_host, host_id)
@@ -150,7 +167,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     @router.post("/containers/action")
     async def container_action(
         payload: ContainerActionPayload,
-        identity: ApiIdentity = Depends(require_permission(PERM_WRITE)),
+        identity: ApiIdentity = Depends(require_permission(PERM_CONTROL)),
     ):
         try:
             return await asyncio.to_thread(
@@ -169,7 +186,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
         host_id: int,
         container_id: str,
         tail: int = 200,
-        identity: ApiIdentity = Depends(require_permission(PERM_READ)),
+        identity: ApiIdentity = Depends(require_permission(PERM_LOGS)),
     ):
         try:
             return {
@@ -189,7 +206,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     async def container_shell(
         host_id: int,
         container_id: str,
-        identity: ApiIdentity = Depends(require_permission("plugin:lyndrix.plugin.docker:docker:exec")),
+        identity: ApiIdentity = Depends(require_permission(PERM_EXEC)),
     ):
         # SECURITY: this runs a Docker `exec` inside the target container, i.e.
         # in-container code execution across the reachable fleet. Gated on the

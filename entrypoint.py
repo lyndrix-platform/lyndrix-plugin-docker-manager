@@ -39,6 +39,7 @@ except ImportError:
             return fn
         return _decorator
 
+from .app import permissions as perms
 from .app.api import build_plugin_router
 from .app.logic.service import DEFAULT_PROBE_INTERVAL
 from .app.logic.service import docker_manager_service as svc
@@ -107,33 +108,43 @@ manifest = ModuleManifest(
             "docker_manager:container:action",
         ],
     },
-    # Identity & Permissions 2.0: dedicated exec permission (container shell
-    # access is more sensitive than a plain write) + roles auto-mapped onto
-    # groups. Role permissions are fully qualified (plugin:<id>:api:*) rather
-    # than the bare global api:read/write, so granting them only ever affects
-    # this plugin.
+    # Identity & Permissions 2.0. Sensitive capabilities are custom permissions
+    # (see app/permissions.py): the core hands plugin:<id>:api:read to every
+    # viewer and :api:write to every user, so only ids that do NOT end in
+    # :api:read/:api:write can actually restrict a route. Role permissions are
+    # fully qualified so granting a role only ever affects this plugin.
     custom_permissions=[
-        {"id": "docker:exec", "label": "Container Shell Exec",
+        {"id": perms.LOGS, "label": "Container Logs",
+         "description": "Read container logs (they routinely contain credentials and tokens)",
+         "icon": "article"},
+        {"id": perms.CONTROL, "label": "Container Control",
+         "description": "Start, stop and restart containers on every registered Docker host",
+         "icon": "play_circle"},
+        {"id": perms.HOSTS, "label": "Docker Host Registry",
+         "description": "Add, change and remove the Docker proxies this plugin talks to",
+         "icon": "dns"},
+        {"id": perms.EXEC, "label": "Container Shell Exec",
          "description": "Open an interactive shell session inside a managed container",
          "icon": "terminal"},
     ],
     roles=[
         {"id": "admin", "label": "Docker Manager Administrator",
          "permissions": [
-             "plugin:lyndrix.plugin.docker:api:read",
-             "plugin:lyndrix.plugin.docker:api:write",
-             "plugin:lyndrix.plugin.docker:docker:exec",
+             perms.PERM_READ, perms.PERM_WRITE, perms.PERM_LOGS, perms.PERM_CONTROL,
+             perms.PERM_HOSTS, perms.PERM_EXEC,
          ],
          "auto_map_groups": ["INT_ADMIN"],
-         "description": "Full control including container shell exec."},
+         "description": "Full control: logs, container control, host registry and shell exec."},
+        # Not auto-mapped on purpose: an administrator assigns it to the people
+        # who operate containers.
         {"id": "operator", "label": "Docker Manager Operator",
-         "permissions": ["plugin:lyndrix.plugin.docker:api:read", "plugin:lyndrix.plugin.docker:api:write"],
+         "permissions": [perms.PERM_READ, perms.PERM_WRITE, perms.PERM_LOGS, perms.PERM_CONTROL],
          "auto_map_groups": [],
-         "description": "Manage hosts and containers, no shell exec."},
+         "description": "Read logs and start/stop/restart containers; no host registry, no shell exec."},
         {"id": "viewer", "label": "Docker Manager Viewer",
-         "permissions": ["plugin:lyndrix.plugin.docker:api:read"],
+         "permissions": [perms.PERM_READ],
          "auto_map_groups": [],
-         "description": "Read-only access to hosts and containers."},
+         "description": "List hosts and containers with their status only."},
     ],
 )
 
@@ -177,8 +188,8 @@ def setup(ctx):
 
     # Single auth'd router, mounted via the registry at
     # /api/plugins/lyndrix.plugin.docker/ on EVERY instance; hosts come from the
-    # shared DB table (registry enforces authentication; routes add
-    # api:read / api:write for authorization).
+    # shared DB table (registry enforces authentication; routes add api:read
+    # and the docker:* permissions for authorization).
     ctx.register_routes(build_plugin_router(svc))
 
     create_task = getattr(ctx, "create_task", None) or asyncio.create_task
