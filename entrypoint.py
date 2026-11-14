@@ -41,6 +41,7 @@ except ImportError:
 
 from .app import permissions as perms
 from .app.api import build_plugin_router
+from .app.logic import targets
 from .app.logic.service import DEFAULT_PROBE_INTERVAL
 from .app.logic.service import docker_manager_service as svc
 from .app.ui.nicegui.overview import render_overview_ui
@@ -296,3 +297,4 @@ async def teardown(ctx):
     """Plugin disabled/unloaded: stop the prober (the core also releases the lease)."""
     await svc.stop_prober()
     svc.close()
+    targets.shutdown()
