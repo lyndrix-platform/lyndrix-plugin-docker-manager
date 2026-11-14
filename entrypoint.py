@@ -295,3 +295,4 @@ def setup(ctx):
 async def teardown(ctx):
     """Plugin disabled/unloaded: stop the prober (the core also releases the lease)."""
     await svc.stop_prober()
+    svc.close()

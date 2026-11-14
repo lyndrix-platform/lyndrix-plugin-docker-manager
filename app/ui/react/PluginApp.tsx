@@ -86,6 +86,29 @@ function StateBadge({ state }: { state: string | null }) {
   )
 }
 
+// Warning for hosts whose proxy connection is not protected. Plain http is the
+// default for existing hosts, so this is what tells an operator about it.
+function SecurityBadge({ host }: { host: DockerHost }) {
+  const { t } = useTranslation('docker')
+  if (!host.insecure) return null
+  const unverified = host.security_warning === 'tls_unverified'
+  const label = unverified
+    ? t('security.tls_unverified', { defaultValue: 'TLS not verified' })
+    : t('security.plaintext', { defaultValue: 'Unencrypted' })
+  const hint = unverified
+    ? t('security.tls_unverified_hint', {
+        defaultValue: 'The certificate of this Docker proxy is not verified; the connection can be intercepted.',
+      })
+    : t('security.plaintext_hint', {
+        defaultValue: 'Unencrypted, unauthenticated connection: anyone who can reach this port controls the Docker host.',
+      })
+  return (
+    <span className="lx-badge lx-badge--paused" title={hint}>
+      <MatIcon name="lock_open" size="var(--lx-icon-xs)" />{label}
+    </span>
+  )
+}
+
 // ─── Responsive styles (injected once) ────────────────────────────────────────
 
 const DM_STYLES = `
@@ -282,6 +305,7 @@ function HostTile({ entry, onClick }: { entry: HostEntry; onClick: () => void })
             <span className="lx-dot" />{runningCount}/{containers.length} aktiv
           </span>
         )}
+        <SecurityBadge host={host} />
         <span className="material-icons" style={{ fontSize: 'var(--lx-icon-xs)', color: 'var(--lx-text-muted)', opacity: 0.4 }}>arrow_forward</span>
       </div>
     </button>
@@ -446,7 +470,7 @@ function ContainerView() {
 
 // ─── Settings view ────────────────────────────────────────────────────────────
 
-const EMPTY_FORM = { name: '', ip: '', port: 2375, scheme: 'http' }
+const EMPTY_FORM = { name: '', ip: '', port: 2375, scheme: 'http', tls_verify: true, tls_ca_path: '' }
 
 function ErrorBox({ msg }: { msg: string }) {
   return (
@@ -508,7 +532,10 @@ function SettingsView() {
 
   function startEdit(host: DockerHost) {
     setEditId(host.id)
-    setForm({ name: host.name, ip: host.ip, port: host.port, scheme: host.scheme })
+    setForm({
+      name: host.name, ip: host.ip, port: host.port, scheme: host.scheme,
+      tls_verify: host.tls_verify ?? true, tls_ca_path: host.tls_ca_path ?? '',
+    })
     setNotice(null)
   }
 
@@ -523,7 +550,9 @@ function SettingsView() {
     setError(null)
     setNotice(null)
     try {
-      const payload = editId !== null ? { ...form, id: editId } : form
+      // An empty CA path clears the setting (system CA store).
+      const body = { ...form, tls_ca_path: form.tls_ca_path.trim() || null }
+      const payload = editId !== null ? { ...body, id: editId } : body
       const res = await dockerManagerApi.upsertHost(payload)
       setHosts(res.hosts)
       cancelEdit()
@@ -636,6 +665,7 @@ function SettingsView() {
                   <div className="lx-mono" style={{ fontSize: '0.6875rem', color: 'var(--lx-text-muted)', marginTop: 2 }}>
                     {host.scheme}://{host.ip}:{host.port}
                   </div>
+                  <div style={{ marginTop: 4 }}><SecurityBadge host={host} /></div>
                 </div>
                 {caps.hosts && (
                   <button
@@ -710,6 +740,32 @@ function SettingsView() {
                 </select>
               </div>
             </div>
+
+            {form.scheme === 'https' && (
+              <>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8125rem', color: 'var(--lx-text)' }}>
+                  <input
+                    type="checkbox"
+                    checked={form.tls_verify}
+                    onChange={(e) => setForm((f) => ({ ...f, tls_verify: e.target.checked }))}
+                  />
+                  {t('hosts.tls_verify', { defaultValue: 'Verify the server certificate' })}
+                </label>
+                <div>
+                  <label className="lx-label">
+                    {t('hosts.tls_ca_path', { defaultValue: 'CA bundle path (optional)' })}
+                  </label>
+                  <input
+                    className="lx-input"
+                    value={form.tls_ca_path}
+                    onChange={(e) => setForm((f) => ({ ...f, tls_ca_path: e.target.value }))}
+                    placeholder="/data/security/docker-ca.pem"
+                  />
+                </div>
+                {/* TODO(agent): client certificate upload — today only via POST /hosts
+                    (tls_client_cert_pem / tls_client_key_pem, stored in Vault). */}
+              </>
+            )}
 
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
               {isEditing && (

@@ -43,6 +43,13 @@ class DockerHostPayload(BaseModel):
     ip: str
     port: int = Field(default=2375)
     scheme: str = Field(default="http")
+    # TLS (scheme "https"). Omitted fields keep the host's current setting.
+    tls_verify: Optional[bool] = Field(default=None)
+    tls_ca_path: Optional[str] = Field(default=None, description="CA bundle file on the core; null clears it")
+    # Write-only: stored in Vault, answered only as the boolean tls_client_auth.
+    tls_client_cert_pem: Optional[str] = Field(default=None, repr=False)
+    tls_client_key_pem: Optional[str] = Field(default=None, repr=False)
+    tls_client_auth: Optional[bool] = Field(default=None, description="false removes the stored client certificate")
 
 
 class DockerHostsSetPayload(BaseModel):
@@ -97,7 +104,9 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
             # Without an id the service upserts by name. Runs off the event
             # loop because it writes the shared DB table (blocking I/O).
             host = await asyncio.to_thread(
-                service.upsert_host, payload.model_dump(exclude_none=True)
+                # exclude_unset keeps an explicit null (clear tls_ca_path)
+                # apart from "field not sent".
+                service.upsert_host, payload.model_dump(exclude_unset=True)
             )
             return {"host": host, "hosts": service.list_hosts()}
         except ValueError as exc:
@@ -137,7 +146,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     ):
         try:
             hosts = await asyncio.to_thread(
-                service.replace_hosts, [h.model_dump() for h in payload.hosts]
+                service.replace_hosts, [h.model_dump(exclude_unset=True) for h in payload.hosts]
             )
             return {"hosts": hosts}
         except ValueError as exc:

@@ -32,6 +32,17 @@ class DockerHostRecord(_Base):
     address = Column(String(255), nullable=False)
     port = Column(Integer, nullable=False, default=2375)
     scheme = Column(String(8), nullable=False, default="http")
+    # TLS towards the proxy (scheme "https"). All three are nullable so rows
+    # written before these columns existed — and by 1.2.0 instances during a
+    # rolling upgrade — keep their meaning: NULL = verify against the system CA
+    # store, no client certificate.
+    tls_verify = Column(Boolean, nullable=True)
+    # CA bundle (PEM file on the core instances) for proxies with a private CA.
+    tls_ca_path = Column(String(1024), nullable=True)
+    # True when a client certificate + key for this host is stored in Vault
+    # (plugin secret ``host_tls_client_<id>``). The material itself never
+    # touches this table or an API response.
+    tls_client_auth = Column(Boolean, nullable=True)
     labels = Column(JSON, nullable=False, default=dict)
     # "manual" (UI / REST / bus) or "iac" (IaC Orchestrator inventory sync).
     source = Column(String(16), nullable=False, default="manual")

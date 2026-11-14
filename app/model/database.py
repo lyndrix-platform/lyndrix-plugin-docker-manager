@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from typing import Callable, Generator, TypeVar
 
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -69,7 +70,38 @@ def ensure_tables() -> None:
                 raise
             log.info(f"DB: create_all lost a bootstrap race ({exc}); re-checking")
             _Base.metadata.create_all(db_instance.engine, checkfirst=True)
+        _add_missing_columns()
     log.info(f"DB: {TABLE} table ready")
+
+
+def _add_missing_columns() -> None:
+    """Add model columns an older plugin version's table does not have yet.
+
+    ``create_all`` never alters an existing table. Only nullable columns
+    without a default are supported, which keeps the ALTER instant and lets
+    instances still running the previous version insert rows meanwhile.
+    Caller holds the bootstrap lock; a duplicate-column error means a peer
+    without advisory locks (older core) added it first.
+    """
+    engine = db_instance.engine
+    for table in _Base.metadata.sorted_tables:
+        existing = {col["name"] for col in inspect(engine).get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            if not column.nullable or column.default is not None or column.server_default is not None:
+                raise RuntimeError(
+                    f"{table.name}.{column.name} cannot be added automatically (must be nullable, no default)"
+                )
+            ddl = f"ALTER TABLE {table.name} ADD COLUMN {column.name} {column.type.compile(engine.dialect)}"
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(ddl))
+                log.info(f"DB: added column {table.name}.{column.name}")
+            except Exception as exc:
+                if not _is_ddl_race(exc):
+                    raise
+                log.info(f"DB: column {table.name}.{column.name} already added by a peer")
 
 
 def retry_write(

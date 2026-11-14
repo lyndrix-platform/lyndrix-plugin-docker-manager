@@ -11,6 +11,25 @@ export interface DockerHost {
   ip: string
   port: number
   scheme: string
+  // TLS settings (scheme "https"); absent on backends older than the TLS support.
+  tls_verify?: boolean
+  tls_ca_path?: string | null
+  // true when a client certificate is stored in Vault (the material is never served).
+  tls_client_auth?: boolean
+  // true when traffic to this proxy can be read or redirected on the path.
+  insecure?: boolean
+  security_warning?: 'unencrypted_unauthenticated' | 'tls_unverified' | 'tls_no_client_auth' | null
+}
+
+// What the host form may send; omitted TLS fields keep the stored setting.
+export interface DockerHostInput {
+  id?: number
+  name: string
+  ip: string
+  port: number
+  scheme: string
+  tls_verify?: boolean
+  tls_ca_path?: string | null
 }
 
 // What the signed-in user may do beyond reading (GET /capabilities). Each flag
@@ -120,7 +139,7 @@ export const dockerManagerApi = {
 
   getHosts: () => pluginApi.get<{ hosts: DockerHost[] }>('hosts'),
 
-  upsertHost: (host: Omit<DockerHost, 'id'> & { id?: number }) =>
+  upsertHost: (host: DockerHostInput) =>
     pluginApi.post<{ host: DockerHost; hosts: DockerHost[] }>('hosts', host),
 
   deleteHost: (id: number) =>

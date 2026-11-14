@@ -7,6 +7,14 @@
   },
   "hosts": {
     "read_only_title": "Nur lesend",
-    "read_only_hint": "Das Ändern von Docker-Hosts erfordert die Berechtigung „Docker Host Registry“ (docker:hosts). Ein Administrator kann die Rolle „Docker Manager Administrator“ vergeben."
+    "read_only_hint": "Das Ändern von Docker-Hosts erfordert die Berechtigung „Docker Host Registry“ (docker:hosts). Ein Administrator kann die Rolle „Docker Manager Administrator“ vergeben.",
+    "tls_verify": "Serverzertifikat prüfen",
+    "tls_ca_path": "Pfad zum CA-Bundle (optional)"
+  },
+  "security": {
+    "plaintext": "Unverschlüsselt",
+    "plaintext_hint": "Unverschlüsselte, nicht authentifizierte Verbindung: Wer diesen Port erreicht, steuert den Docker-Host.",
+    "tls_unverified": "TLS nicht geprüft",
+    "tls_unverified_hint": "Das Zertifikat dieses Docker-Proxys wird nicht geprüft; die Verbindung kann abgefangen werden."
   }
 }

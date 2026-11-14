@@ -16,6 +16,7 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 
 from ..model import database as db
+from . import tls
 from ..model.models import HOST_SOURCES, DockerHostRecord
 
 # Cluster-wide "the host table changed, re-read it" (relayed copies carry _origin).
@@ -86,6 +87,7 @@ class DockerManagerService:
         self._bootstrap_lock: asyncio.Lock | None = None
         self._probe_task: asyncio.Task | None = None
         self._probe_interval = DEFAULT_PROBE_INTERVAL
+        self._client_certs = tls.ClientCertStore()
 
     @property
     def is_ready(self) -> bool:
@@ -150,17 +152,39 @@ class DockerManagerService:
             host["ci_id"] = str(raw_host["ci_id"])[:36]
         if isinstance(raw_host.get("labels"), dict):
             host["labels"] = raw_host["labels"]
+
+        # TLS settings: only keys the caller sent are touched, so older UIs and
+        # automation that know nothing about them leave a host's TLS setup alone.
+        if raw_host.get("tls_verify") is not None:
+            if not isinstance(raw_host["tls_verify"], bool):
+                raise ValueError("tls_verify must be true or false")
+            host["tls_verify"] = raw_host["tls_verify"]
+        if "tls_ca_path" in raw_host:
+            host["tls_ca_path"] = tls.normalize_ca_path(raw_host["tls_ca_path"])
+        cert_pem, key_pem = raw_host.get("tls_client_cert_pem"), raw_host.get("tls_client_key_pem")
+        if cert_pem or key_pem:
+            # Kept apart from the row fields: this goes to Vault, never the DB.
+            host["_client_pem"] = tls.normalize_client_pem(cert_pem, key_pem)
+        elif raw_host.get("tls_client_auth") is False:
+            host["_client_pem"] = None  # explicit removal
         return host
 
     @staticmethod
     def _row_to_dict(row: DockerHostRecord) -> Dict[str, Any]:
         """REST/JSON shape: the 1.1 keys (id/name/ip/port/scheme) + additive fields."""
+        scheme = row.scheme or "http"
+        verify = row.tls_verify is not False  # NULL (pre-TLS rows) = verify
+        client_auth = bool(row.tls_client_auth)
         return {
             "id": int(row.id),
             "name": row.name,
             "ip": row.address,
             "port": int(row.port or 2375),
-            "scheme": row.scheme or "http",
+            "scheme": scheme,
+            "tls_verify": verify,
+            "tls_ca_path": row.tls_ca_path,
+            "tls_client_auth": client_auth,
+            **tls.security_summary(scheme, verify, client_auth),
             "source": row.source or "manual",
             "ci_id": row.ci_id,
             "labels": row.labels or {},
@@ -181,6 +205,10 @@ class DockerManagerService:
             row.ci_id = host["ci_id"]
         if "labels" in host:
             row.labels = host["labels"]
+        if "tls_verify" in host:
+            row.tls_verify = host["tls_verify"]
+        if "tls_ca_path" in host:
+            row.tls_ca_path = host["tls_ca_path"]
 
     def _new_row(self, host: Dict[str, Any], *, source: str = "manual") -> DockerHostRecord:
         row = DockerHostRecord(source=host.get("source", source), labels={})
@@ -237,6 +265,7 @@ class DockerManagerService:
         if not isinstance(payload, dict) or not payload.get("_origin"):
             return  # own emit — the cache is already fresh
         self.invalidate_cache()
+        self._client_certs.invalidate()  # a peer may have rotated a certificate
         try:
             await asyncio.to_thread(self.load_hosts)
         except Exception as exc:
@@ -252,6 +281,10 @@ class DockerManagerService:
         if not self._schema_ready:
             db.ensure_tables()
             self._schema_ready = True
+
+    def close(self) -> None:
+        """Plugin unloaded: drop the client-certificate files of this process."""
+        self._client_certs.close()
 
     def mark_vault_ready(self) -> None:
         self._vault_ready = True
@@ -421,11 +454,37 @@ class DockerManagerService:
             result = db.retry_write(lambda: self._upsert_tx(host), integrity=True)
         except IntegrityError as exc:
             raise ValueError(f"Host conflicts with an existing host: {host['name']}") from exc
+        if "_client_pem" in host:
+            result = self._set_client_cert(result["id"], host["_client_pem"])
         if emit:
             self._after_change("upsert", [result["id"]])
         else:
             self.invalidate_cache()
         return result
+
+    def _set_client_cert(self, host_id: int, pem: Dict[str, str] | None) -> Dict[str, Any]:
+        """Store (or remove, ``pem=None``) a host's client certificate. Blocking.
+
+        Vault first, then the row flag: a failed Vault write leaves the host
+        without the flag instead of pointing at material that is not there.
+        """
+        ctx = self._ctx
+        if ctx is None or not self._vault_ready:
+            raise RuntimeError("Vault is not ready — the host was saved without the client certificate change")
+        tls.ClientCertStore.store(ctx.set_secret, host_id, pem)
+        self._client_certs.invalidate(host_id)
+
+        def _tx() -> Dict[str, Any]:
+            with db.get_session() as s:
+                row = s.get(DockerHostRecord, int(host_id))
+                if row is None:
+                    raise ValueError(f"Unknown host id: {host_id}")
+                row.tls_client_auth = bool(pem)
+                s.commit()
+                s.refresh(row)
+                return self._row_to_dict(row)
+
+        return db.retry_write(_tx)
 
     def _replace_tx(self, hosts: List[Dict[str, Any]]) -> List[int]:
         with db.get_session() as s:
@@ -467,6 +526,10 @@ class DockerManagerService:
         names = [h["name"] for h in normalized]
         if len(names) != len(set(names)):
             raise ValueError("Host names must be unique")
+        if any("_client_pem" in h for h in normalized):
+            # One Vault write per host belongs in the single-host call, not in
+            # an all-or-nothing table replace.
+            raise ValueError("Client certificates can only be changed per host (POST /hosts)")
         self._require_db()
         try:
             ids = db.retry_write(lambda: self._replace_tx(normalized))
@@ -589,11 +652,26 @@ class DockerManagerService:
     def delete_host(self, host_id: int, *, emit: bool = True) -> bool:
         self._require_db()
         changed = db.retry_write(lambda: self._delete_tx(host_id))
+        if changed:
+            self._forget_client_cert(int(host_id))
         if changed and emit:
             self._after_change("delete", [int(host_id)])
         elif changed:
             self.invalidate_cache()
         return changed
+
+    def _forget_client_cert(self, host_id: int) -> None:
+        """Best effort: blank the Vault secret of a deleted host. Ids are never
+        reused, so a leftover could not attach to another host anyway."""
+        self._client_certs.invalidate(host_id)
+        ctx = self._ctx
+        if ctx is None or not self._vault_ready:
+            return
+        try:
+            if ctx.get_secret(tls.secret_key(host_id)):
+                ctx.set_secret(tls.secret_key(host_id), "")
+        except Exception as exc:
+            self._log("warning", f"Docker Manager: client certificate of host {host_id} not removed: {exc}")
 
     # ── IaC inventory ────────────────────────────────────────────────────────
 
@@ -756,6 +834,27 @@ class DockerManagerService:
     def _base_url(host: Dict[str, Any]) -> str:
         return f"{host['scheme']}://{host['ip']}:{host['port']}"
 
+    def _tls_kwargs(self, host: Dict[str, Any]) -> Dict[str, Any]:
+        """``requests`` TLS options of one host (empty for plain http). Blocking
+        when the client certificate has to be fetched from Vault."""
+        if host.get("scheme") != "https":
+            return {}
+        kwargs: Dict[str, Any] = {"verify": False}
+        if host.get("tls_verify", True):
+            kwargs["verify"] = host.get("tls_ca_path") or True
+        if host.get("tls_client_auth"):
+            ctx = self._ctx
+            if ctx is None:
+                raise RuntimeError("Plugin context not ready")
+            kwargs["cert"] = self._client_certs.files(ctx.get_secret, host["id"])
+        return kwargs
+
+    def _http(self, method: str, host: Dict[str, Any], path: str, *, timeout: float, **kwargs: Any) -> requests.Response:
+        """The one place that talks to a Docker proxy (blocking)."""
+        return requests.request(
+            method, f"{self._base_url(host)}{path}", timeout=timeout, **self._tls_kwargs(host), **kwargs
+        )
+
     @staticmethod
     def _container_to_row(container: Dict[str, Any]) -> Dict[str, Any]:
         name = (container.get("Names") or ["/unknown"])[0].lstrip("/")
@@ -770,8 +869,7 @@ class DockerManagerService:
 
     def fetch_single_host(self, host: Dict[str, Any], *, include_stopped: bool = True) -> List[Dict[str, Any]]:
         params = {"all": 1 if include_stopped else 0}
-        url = f"{self._base_url(host)}/containers/json"
-        response = requests.get(url, params=params, timeout=2.0)
+        response = self._http("GET", host, "/containers/json", params=params, timeout=2.0)
         response.raise_for_status()
         return [self._container_to_row(item) for item in response.json()]
 
@@ -851,8 +949,7 @@ class DockerManagerService:
 
         last_404: requests.Response | None = None
         for ref in refs:
-            url = f"{self._base_url(host)}/containers/{ref}/{endpoint}"
-            response = requests.post(url, params=params, json={}, timeout=timeout)
+            response = self._http("POST", host, f"/containers/{ref}/{endpoint}", params=params, json={}, timeout=timeout)
             if response.status_code == 404:
                 last_404 = response
                 continue
@@ -864,8 +961,7 @@ class DockerManagerService:
 
     def _container_running(self, host: Dict[str, Any], refs: List[str]) -> bool:
         for ref in refs:
-            url = f"{self._base_url(host)}/containers/{ref}/json"
-            response = requests.get(url, timeout=3.0)
+            response = self._http("GET", host, f"/containers/{ref}/json", timeout=3.0)
             if response.status_code == 404:
                 continue
             response.raise_for_status()
@@ -956,9 +1052,8 @@ class DockerManagerService:
 
         last_404 = False
         for ref in refs:
-            url = f"{self._base_url(host)}/containers/{ref}/logs"
-            response = requests.get(
-                url,
+            response = self._http(
+                "GET", host, f"/containers/{ref}/logs",
                 params={"stdout": 1, "stderr": 1, "tail": max(1, min(int(tail), 2000))},
                 timeout=6.0,
             )
@@ -983,7 +1078,6 @@ class DockerManagerService:
         container_name: str | None = None,
     ) -> str:
         host = self._resolve_host(host_id)
-        base_url = self._base_url(host)
         refs = self._container_refs(container_id, container_name)
 
         commands = [
@@ -1004,8 +1098,8 @@ class DockerManagerService:
                     "Tty": True,
                     "Cmd": cmd,
                 }
-                create_resp = requests.post(
-                    f"{base_url}/containers/{ref}/exec",
+                create_resp = self._http(
+                    "POST", host, f"/containers/{ref}/exec",
                     json=create_payload,
                     timeout=5.0,
                 )
@@ -1023,8 +1117,8 @@ class DockerManagerService:
                     errors.append(f"{ref}/{cmd[0]}: exec id missing")
                     continue
 
-                start_resp = requests.post(
-                    f"{base_url}/exec/{exec_id}/start",
+                start_resp = self._http(
+                    "POST", host, f"/exec/{exec_id}/start",
                     json={"Detach": False, "Tty": True},
                     timeout=8.0,
                 )
@@ -1060,7 +1154,7 @@ class DockerManagerService:
         selected_ref = refs[0] if refs else ""
         inspect_data = None
         for ref in refs:
-            inspect_resp = requests.get(f"{self._base_url(host)}/containers/{ref}/json", timeout=4.0)
+            inspect_resp = self._http("GET", host, f"/containers/{ref}/json", timeout=4.0)
             if inspect_resp.status_code == 404:
                 continue
             inspect_resp.raise_for_status()
@@ -1086,8 +1180,8 @@ class DockerManagerService:
         lines.append(f"PID: {pid}")
         lines.append(f"StartedAt: {started_at}\n")
 
-        top_resp = requests.get(
-            f"{self._base_url(host)}/containers/{selected_ref}/top",
+        top_resp = self._http(
+            "GET", host, f"/containers/{selected_ref}/top",
             params={"ps_args": "aux"},
             timeout=5.0,
         )

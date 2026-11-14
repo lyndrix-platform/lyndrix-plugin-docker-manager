@@ -7,6 +7,14 @@
   },
   "hosts": {
     "read_only_title": "Read-only",
-    "read_only_hint": "Changing Docker hosts requires the permission \"Docker Host Registry\" (docker:hosts). Ask an administrator for the Docker Manager Administrator role."
+    "read_only_hint": "Changing Docker hosts requires the permission \"Docker Host Registry\" (docker:hosts). Ask an administrator for the Docker Manager Administrator role.",
+    "tls_verify": "Verify the server certificate",
+    "tls_ca_path": "CA bundle path (optional)"
+  },
+  "security": {
+    "plaintext": "Unencrypted",
+    "plaintext_hint": "Unencrypted, unauthenticated connection: anyone who can reach this port controls the Docker host.",
+    "tls_unverified": "TLS not verified",
+    "tls_unverified_hint": "The certificate of this Docker proxy is not verified; the connection can be intercepted."
   }
 }
