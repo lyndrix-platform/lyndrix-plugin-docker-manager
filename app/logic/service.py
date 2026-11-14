@@ -31,6 +31,14 @@ LEGACY_MARKER_KEY = "configured_hosts_migrated_at"
 CACHE_TTL_SECONDS = 30.0
 DEFAULT_PROBE_INTERVAL = 60
 MIN_PROBE_INTERVAL = 10
+# The prober runs on its own small pool: asyncio.to_thread would put one job
+# per host into the default executor every plugin shares (6 workers on a
+# 2-vCPU pod), so a sweep over unreachable hosts would stall every plugin's DB
+# access for seconds.
+PROBE_WORKERS = 4
+# Upper bound for one host (DNS 3 s + connect 2 s + read 2 s, plus slack). A
+# probe that exceeds it is reported unreachable instead of delaying the sweep.
+PROBE_HOST_TIMEOUT = 8.0
 
 # Docker's own grammar for container ids (hex) and names. The first character
 # must be alphanumeric, so "." and ".." — which urllib3 would collapse as dot
@@ -79,6 +87,7 @@ class DockerManagerService:
         self._probe_task: asyncio.Task | None = None
         self._probe_interval = DEFAULT_PROBE_INTERVAL
         self._client_certs = tls.ClientCertStore()
+        self._probe_pool: ThreadPoolExecutor | None = None
 
     @property
     def is_ready(self) -> bool:
@@ -274,8 +283,11 @@ class DockerManagerService:
             self._schema_ready = True
 
     def close(self) -> None:
-        """Plugin unloaded: drop the client-certificate files of this process."""
+        """Plugin unloaded: drop the client-certificate files and the probe pool."""
         self._client_certs.close()
+        pool, self._probe_pool = self._probe_pool, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def mark_vault_ready(self) -> None:
         self._vault_ready = True
@@ -765,9 +777,28 @@ class DockerManagerService:
         hosts = await asyncio.to_thread(self.load_hosts)
         if not hosts:
             return []
-        results = await asyncio.gather(*(asyncio.to_thread(self._probe_host, h) for h in hosts))
-        await asyncio.to_thread(self._store_probe_results, list(results))
-        return list(results)
+        if self._probe_pool is None:
+            self._probe_pool = ThreadPoolExecutor(
+                max_workers=PROBE_WORKERS, thread_name_prefix="docker-manager-probe"
+            )
+        pool = self._probe_pool
+        loop = asyncio.get_running_loop()
+        # The semaphore keeps the per-host clock honest: a host's timeout
+        # starts when a worker is free for it, not when the sweep began.
+        slots = asyncio.Semaphore(PROBE_WORKERS)
+
+        async def _bounded(host: Dict[str, Any]) -> tuple[int, bool, str | None]:
+            async with slots:
+                try:
+                    return await asyncio.wait_for(
+                        loop.run_in_executor(pool, self._probe_host, host), PROBE_HOST_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    return int(host["id"]), False, f"Probe timed out after {PROBE_HOST_TIMEOUT:g}s"
+
+        results = list(await asyncio.gather(*(_bounded(h) for h in hosts)))
+        await asyncio.to_thread(self._store_probe_results, results)
+        return results
 
     def _store_probe_results(self, results: List[tuple[int, bool, str | None]]) -> None:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
