@@ -234,7 +234,7 @@ _INVENTORY = {"hosts": [
 def test_iac_sync_adds_updates_and_keeps_manual_hosts(svc):
     manual = svc.upsert_host(_H)
     stats = asyncio.run(svc.on_iac_inventory(_INVENTORY))
-    assert stats == {"added": 2, "updated": 0, "total": 3}
+    assert stats == {"added": 2, "updated": 0, "unchanged": 0, "total": 3}
     by_name = {h["name"]: h for h in svc.list_hosts()}
     assert by_name["docker-atlas"]["source"] == "iac" and by_name["docker-atlas"]["ci_id"] == "c1"
     assert by_name["atlas"]["id"] == manual["id"] and by_name["atlas"]["source"] == "manual"
@@ -260,13 +260,15 @@ def test_iac_sync_survives_lost_insert_race(svc, monkeypatch):
     def _racy(host):
         calls["n"] += 1
         if calls["n"] == 1:
-            svc._upsert_tx({**host, "source": "iac"})  # the "peer" wins the insert
+            # the "peer" wins the insert
+            svc._upsert_tx({"port": 2375, "scheme": "http", **host, "source": "iac"})
             raise IntegrityError("INSERT", {}, Exception("(1062, 'Duplicate entry')"))
         return real(host)
 
     monkeypatch.setattr(svc, "_sync_one_tx", _racy)
     stats = svc.sync_orchestrator_hosts([{"name": "docker-atlas", "ip": "10.1.10.20"}])
-    assert stats == {"added": 0, "updated": 1, "total": 1}
+    # The peer's row already equals the inventory → nothing left to write.
+    assert stats == {"added": 0, "updated": 0, "unchanged": 1, "total": 1}
 
 
 # --- legacy Vault import -------------------------------------------------------------

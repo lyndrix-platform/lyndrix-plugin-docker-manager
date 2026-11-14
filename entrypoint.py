@@ -234,7 +234,8 @@ def setup(ctx):
         except Exception as exc:
             ctx.log.error(f"Docker Manager: IaC inventory sync failed: {exc}")
             return
-        if stats:
+        # The inventory is re-published on every render; only report real changes.
+        if stats and (stats["added"] or stats["updated"]):
             ctx.log.info(
                 f"Docker Manager: IaC inventory sync — {stats['added']} added, "
                 f"{stats['updated']} updated, {stats['total']} total."

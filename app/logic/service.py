@@ -478,37 +478,69 @@ class DockerManagerService:
             self.invalidate_cache()
         return self.list_hosts() if emit else self.load_hosts()
 
+    @staticmethod
+    def _sync_changes(row: DockerHostRecord, host: Dict[str, Any]) -> Dict[str, Any]:
+        """Fields a sync entry may change on an existing row (column → value).
+
+        The inventory owns the address and the CI id of the rows it created
+        (``source == "iac"``). It never owns how the proxy is reached: port and
+        scheme change only when the caller states them explicitly, TLS settings
+        never. A ``manual`` row was configured by an operator on purpose, so a
+        sync only links it to its CI and leaves every connection field alone —
+        otherwise each inventory render would silently reset e.g. https:2376
+        to http:2375.
+        """
+        wanted: Dict[str, Any] = {}
+        if host.get("ci_id"):
+            wanted["ci_id"] = host["ci_id"]
+        if (row.source or "manual") == "iac":
+            wanted["address"] = host["ip"]
+            for key in ("port", "scheme"):
+                if key in host:
+                    wanted[key] = host[key]
+        return {col: value for col, value in wanted.items() if getattr(row, col) != value}
+
     def _sync_one_tx(self, host: Dict[str, Any]) -> tuple[str, int]:
         with db.get_session() as s:
             row = s.query(DockerHostRecord).filter(DockerHostRecord.name == host["name"]).one_or_none()
             if row is None:
-                row = self._new_row({**host, "source": host.get("source", "iac")})
+                row = self._new_row({"port": 2375, "scheme": "http", **host,
+                                     "source": host.get("source", "iac")})
                 s.add(row)
-                outcome = "added"
-            else:
-                # Connection fields (and the CI id, when known) come from the
-                # inventory; id, source and labels of the existing row are kept.
-                row.address = host["ip"]
-                row.port = host["port"]
-                row.scheme = host["scheme"]
-                if host.get("ci_id"):
-                    row.ci_id = host["ci_id"]
-                outcome = "updated"
+                s.commit()
+                return "added", int(row.id)
+            changes = self._sync_changes(row, host)
+            if not changes:
+                return "unchanged", int(row.id)
+            for col, value in changes.items():
+                setattr(row, col, value)
             s.commit()
-            return outcome, int(row.id)
+            return "updated", int(row.id)
+
+    def _sync_pending(self, hosts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The entries that would add or change a row — one read, no row locks."""
+        with db.get_session() as s:
+            rows = {r.name: r for r in s.query(DockerHostRecord).all()}
+            return [h for h in hosts if h["name"] not in rows or self._sync_changes(rows[h["name"]], h)]
 
     def sync_orchestrator_hosts(self, incoming: list[dict]) -> dict:
-        """Upsert hosts by name without removing unrecognized entries. Blocking.
+        """Add missing hosts and update inventory-owned fields. Blocking.
 
-        Intended for automated callers (IaC Orchestrator). One short transaction
-        per host, retried on 1020/1205/1213 and on a lost insert race, so two
-        instances syncing the same inventory converge instead of colliding.
+        Intended for automated callers (IaC Orchestrator). Entries are matched by
+        name; hosts absent from ``incoming`` are left alone. ``port``/``scheme``
+        are applied only when an entry states them, and never to a ``manual``
+        row (see ``_sync_changes``).
 
-        Returns ``{"added": n, "updated": n, "total": n}``.
+        The orchestrator re-publishes the whole inventory on every render, so
+        the common case is "nothing changed": one read decides which entries
+        need a write, only those get a transaction (retried on 1020/1205/1213
+        and on a lost insert race), and peers are only told to reload when a
+        row was actually added or changed.
+
+        Returns ``{"added": n, "updated": n, "unchanged": n, "total": n}``.
         """
         self._require_db()
-        added = updated = 0
-        ids: List[int] = []
+        hosts: List[Dict[str, Any]] = []
         for raw in incoming or []:
             if not isinstance(raw, dict) or not str(raw.get("name") or "").strip():
                 continue
@@ -518,18 +550,32 @@ class DockerManagerService:
                 self._log("warning", f"Docker Manager: sync skipped {raw.get('name')!r}: {exc}")
                 continue
             host.pop("id", None)
+            # Keep only the connection fields the caller actually stated; the
+            # normaliser's defaults must not masquerade as inventory data.
+            for key in ("port", "scheme"):
+                if raw.get(key) is None:
+                    host.pop(key, None)
+            hosts.append(host)
+
+        counts = {"added": 0, "updated": 0, "unchanged": 0}
+        ids: List[int] = []
+        pending = self._sync_pending(hosts) if hosts else []
+        counts["unchanged"] = len(hosts) - len(pending)
+        for host in pending:
             try:
                 outcome, host_id = db.retry_write(lambda h=host: self._sync_one_tx(h), integrity=True)
             except Exception as exc:
                 self._log("error", f"Docker Manager: sync of '{host['name']}' failed: {exc}")
                 continue
-            ids.append(host_id)
-            if outcome == "added":
-                added += 1
-            else:
-                updated += 1
-        self._after_change("sync", ids)
-        return {"added": added, "updated": updated, "total": len(self.list_hosts())}
+            counts[outcome] += 1
+            if outcome != "unchanged":  # a peer may have written the same change meanwhile
+                ids.append(host_id)
+        if ids:
+            self._after_change("sync", ids)
+        elif pending:
+            # Someone else wrote in between (lost race) — our cache is behind.
+            self.invalidate_cache()
+        return {**counts, "total": len(self.current_hosts())}
 
     def _delete_tx(self, host_id: int) -> bool:
         with db.get_session() as s:
@@ -564,7 +610,10 @@ class DockerManagerService:
             if not isinstance(h, dict) or not h.get("ip") or not h.get("name"):
                 continue
             if "docker_hosts" in (h.get("groups") or []) or "docker" in (h.get("baseline_roles") or []):
-                entry = {"name": h["name"], "ip": h["ip"], "port": 2375, "scheme": "http", "source": "iac"}
+                # The inventory knows name, address and CI — not how the Docker
+                # proxy is exposed, so it states no port/scheme (new rows get
+                # the defaults, existing rows keep theirs).
+                entry = {"name": h["name"], "ip": h["ip"], "source": "iac"}
                 if h.get("ci_id"):
                     entry["ci_id"] = h["ci_id"]
                 result.append(entry)

@@ -50,11 +50,15 @@ class DockerHostsSetPayload(BaseModel):
 
 
 class DockerHostSyncEntry(BaseModel):
-    """Minimal host descriptor used for automated upserts (no id field)."""
+    """Minimal host descriptor used for automated upserts (no id field).
+
+    ``port``/``scheme`` are optional on purpose: omitted means "not mine" —
+    new hosts get 2375/http, existing hosts keep what they have.
+    """
     name: str
     ip: str
-    port: int = Field(default=2375)
-    scheme: str = Field(default="http")
+    port: Optional[int] = Field(default=None)
+    scheme: Optional[str] = Field(default=None)
 
 
 class DockerHostSyncPayload(BaseModel):
@@ -111,12 +115,14 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
         Intended for automated callers (IaC Orchestrator, Ansible, scripts).
         Hosts present in the current list but absent from ``payload.hosts``
         are left untouched — unlike ``/hosts/set`` which replaces everything.
-        New hosts get ``source: "iac"``.
+        New hosts get ``source: "iac"``. Existing ``iac`` hosts follow the
+        address (and an explicitly stated port/scheme); manually configured
+        hosts keep all their connection settings.
         """
         try:
             stats = await asyncio.to_thread(
                 service.sync_orchestrator_hosts,
-                [h.model_dump() for h in payload.hosts],
+                [h.model_dump(exclude_none=True) for h in payload.hosts],
             )
             return {"ok": True, **stats, "hosts": service.list_hosts()}
         except ValueError as exc:
