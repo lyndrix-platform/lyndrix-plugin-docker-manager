@@ -199,3 +199,12 @@ def test_viewer_gets_no_internal_host_details(monkeypatch):
     admin_host, admin_containers = _get({f"{P}:api:read", f"{P}:docker:hosts"})
     assert admin_host["labels"] == {"rack": "b2"} and admin_host["check_error"]
     assert "refused" in admin_containers["atlas#1"]["error"]
+
+
+def test_nicegui_page_requires_the_strictest_permission(monkeypatch):
+    """DM-07: the NiceGUI page has no per-action checks, so it is admin-only."""
+    import inspect
+    entrypoint = _load_entrypoint()
+
+    source = inspect.getsource(entrypoint.setup)
+    assert 'permission=perms.PERM_EXEC' in source

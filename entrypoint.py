@@ -293,8 +293,19 @@ def setup(ctx):
             response["correlation_id"] = payload["correlation_id"]
         ctx.emit("docker_manager:hosts:state", response)
 
+    # DM-07: the legacy NiceGUI page calls control, logs and shell snapshot
+    # without per-action checks (core.api exposes no session permission check
+    # for plugins). Until it does, the whole page requires the strictest
+    # permission it exposes. The React UI is canonical and checks per action.
+    # TODO(agent): gate per action (viewer/operator) once core.api offers a
+    # session permission helper, then relax this to PERM_READ.
+    try:
+        page_layout = main_layout("Docker Manager", permission=perms.PERM_EXEC)
+    except TypeError:  # older core without the ``permission`` argument
+        page_layout = main_layout("Docker Manager")
+
     @ui.page("/docker")
-    @main_layout("Docker Manager")
+    @page_layout
     async def docker_page():
         render_overview_ui(ctx, svc)
 
