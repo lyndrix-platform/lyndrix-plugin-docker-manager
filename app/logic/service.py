@@ -504,10 +504,12 @@ class DockerManagerService:
                     raise ValueError(f"Host name already in use: {host['name']}")
                 self._apply(row, host)
             elif host.get("id") is not None:
-                # Explicit id that does not exist (bus/legacy callers): create it.
+                # Unknown id (stale automation payload): ids are never reused, so
+                # the host is created under a fresh id instead of resurrecting
+                # the deleted one.
                 if by_name is not None:
                     raise ValueError(f"Host name already in use: {host['name']}")
-                row = self._new_row(host)
+                row = self._new_row({k: v for k, v in host.items() if k != "id"})
                 s.add(row)
             elif by_name is not None:
                 row = by_name  # upsert by name
@@ -598,7 +600,8 @@ class DockerManagerService:
             s.flush()
             for host, row in plan:
                 if row is None:
-                    row = self._new_row(host)
+                    # Unknown id: never recreate a deleted id (see _upsert_tx).
+                    row = self._new_row({k: v for k, v in host.items() if k != "id"})
                     s.add(row)
                 else:
                     self._apply(row, host)
@@ -969,7 +972,10 @@ class DockerManagerService:
         """
         if not db.is_connected():
             return {"status": "degraded", "details": {"reason": "db_unavailable"}}
-        self._require_db()
+        if not self._schema_ready:
+            # Health is polled on every instance: never run DDL (bootstrap lock +
+            # create_all) from here. ensure_ready() creates the tables.
+            return {"status": "degraded", "details": {"reason": "schema_not_ready"}}
         with db.get_session() as s:
             rows = s.query(
                 DockerHostRecord.name, DockerHostRecord.reachable,

@@ -358,6 +358,7 @@ def test_probe_writes_results_and_health_reads_them(svc, monkeypatch):
 
 
 def test_health_without_hosts_or_db(svc, monkeypatch):
+    svc._require_db()  # health itself never creates tables (DM-08)
     assert svc.health_snapshot()["details"]["reason"] == "no_hosts_configured"
     from app.model import database
 
