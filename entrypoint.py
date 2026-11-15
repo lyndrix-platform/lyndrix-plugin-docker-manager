@@ -42,6 +42,7 @@ except ImportError:
 from .app import permissions as perms
 from .app.api import build_plugin_router
 from .app.logic import targets
+from .app.logic.audit import DEFAULT_RETENTION_DAYS as DEFAULT_AUDIT_RETENTION_DAYS
 from .app.logic.service import DEFAULT_PROBE_INTERVAL
 from .app.logic.service import docker_manager_service as svc
 from .app.ui.nicegui.overview import render_overview_ui
@@ -89,6 +90,10 @@ manifest = ModuleManifest(
          "kind": "int", "category": "Probing", "default": str(DEFAULT_PROBE_INTERVAL),
          "description": "How often one instance (under the docker_manager:prober lease) checks every "
                         "Docker proxy and stores the result for health(). Minimum 10."},
+        {"key": "audit_retention_days", "label": "Audit trail retention (days)",
+         "kind": "int", "category": "Audit", "default": str(DEFAULT_AUDIT_RETENTION_DAYS),
+         "description": "Entries of the audit trail (container start/stop/restart, log reads, shell exec, "
+                        "host changes) older than this are deleted by the prober instance. 0 keeps them forever."},
     ],
     permissions={
         "subscribe": [
@@ -127,15 +132,18 @@ manifest = ModuleManifest(
         {"id": perms.EXEC, "label": "Container Shell Exec",
          "description": "Open an interactive shell session inside a managed container",
          "icon": "terminal"},
+        {"id": perms.AUDIT, "label": "Docker Audit Trail",
+         "description": "Read who started, stopped, exec'd into or read the logs of which container",
+         "icon": "fact_check"},
     ],
     roles=[
         {"id": "admin", "label": "Docker Manager Administrator",
          "permissions": [
              perms.PERM_READ, perms.PERM_WRITE, perms.PERM_LOGS, perms.PERM_CONTROL,
-             perms.PERM_HOSTS, perms.PERM_EXEC,
+             perms.PERM_HOSTS, perms.PERM_EXEC, perms.PERM_AUDIT,
          ],
          "auto_map_groups": ["INT_ADMIN"],
-         "description": "Full control: logs, container control, host registry and shell exec."},
+         "description": "Full control: logs, container control, host registry, shell exec and audit trail."},
         # Not auto-mapped on purpose: an administrator assigns it to the people
         # who operate containers.
         {"id": "operator", "label": "Docker Manager Operator",

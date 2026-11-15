@@ -9,8 +9,9 @@ route automatically. Authorization (see ``app/permissions.py`` for the why):
   docker:control  start / stop / restart
   docker:hosts    host registry writes
   docker:exec     shell snapshot
+  docker:audit    read the audit trail
 
-The four ``docker:*`` permissions get no baseline grant and no global
+The ``docker:*`` permissions get no baseline grant and no global
 ``api:read``/``api:write`` fallback, so a merely-authenticated user can look
 but not read logs, control containers or redirect the proxy targets.
 """
@@ -27,6 +28,7 @@ from core.api import ApiIdentity, require_permission
 from .logic.service import DockerManagerService
 from .permissions import (  # noqa: F401  (PLUGIN_ID/PERM_WRITE re-exported for callers)
     CAPABILITIES,
+    PERM_AUDIT,
     PERM_CONTROL,
     PERM_EXEC,
     PERM_HOSTS,
@@ -121,7 +123,8 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
             host = await asyncio.to_thread(
                 # exclude_unset keeps an explicit null (clear tls_ca_path)
                 # apart from "field not sent".
-                service.upsert_host, payload.model_dump(exclude_unset=True)
+                service.upsert_host, payload.model_dump(exclude_unset=True),
+                actor=identity.username,
             )
             return {"host": host, "hosts": service.list_hosts()}
         except ValueError as exc:
@@ -147,6 +150,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
             stats = await asyncio.to_thread(
                 service.sync_orchestrator_hosts,
                 [h.model_dump(exclude_none=True) for h in payload.hosts],
+                actor=identity.username,
             )
             return {"ok": True, **stats, "hosts": service.list_hosts()}
         except ValueError as exc:
@@ -161,7 +165,8 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
     ):
         try:
             hosts = await asyncio.to_thread(
-                service.replace_hosts, [h.model_dump(exclude_unset=True) for h in payload.hosts]
+                service.replace_hosts, [h.model_dump(exclude_unset=True) for h in payload.hosts],
+                actor=identity.username,
             )
             return {"hosts": hosts}
         except ValueError as exc:
@@ -175,7 +180,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
         identity: ApiIdentity = Depends(require_permission(PERM_HOSTS)),
     ):
         try:
-            removed = await asyncio.to_thread(service.delete_host, host_id)
+            removed = await asyncio.to_thread(service.delete_host, host_id, actor=identity.username)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         if not removed:
@@ -214,6 +219,7 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
                 payload.host_id,
                 payload.container_id,
                 payload.action,
+                actor=identity.username,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -233,7 +239,8 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
                 "container_id": container_id,
                 "tail": tail,
                 "logs": await asyncio.to_thread(
-                    service.container_logs, host_id, container_id, tail=tail
+                    service.container_logs, host_id, container_id, tail=tail,
+                    actor=identity.username,
                 ),
             }
         except ValueError as exc:
@@ -257,12 +264,35 @@ def build_plugin_router(service: DockerManagerService) -> APIRouter:
                 "host_id": host_id,
                 "container_id": container_id,
                 "output": await asyncio.to_thread(
-                    service.container_shell_snapshot, host_id, container_id
+                    service.container_shell_snapshot, host_id, container_id,
+                    actor=identity.username,
                 ),
             }
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # ── Audit trail ──────────────────────────────────────────────────────────
+    @router.get("/audit")
+    async def audit_trail(
+        limit: int = 100,
+        before_id: Optional[int] = None,
+        host_id: Optional[int] = None,
+        action: Optional[str] = None,
+        actor: Optional[str] = None,
+        identity: ApiIdentity = Depends(require_permission(PERM_AUDIT)),
+    ):
+        """Who did what, newest first. Page backwards with ``before_id`` =
+        ``next_before_id`` of the previous page (null = no more entries)."""
+        try:
+            entries = await asyncio.to_thread(
+                service.audit_entries, limit=limit, before_id=before_id,
+                host_id=host_id, action=action, actor=actor,
+            )
+        except RuntimeError as exc:  # database not connected
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        full_page = len(entries) >= max(1, min(limit, 500))
+        return {"entries": entries, "next_before_id": entries[-1]["id"] if entries and full_page else None}
 
     return router

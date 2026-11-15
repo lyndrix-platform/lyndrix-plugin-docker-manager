@@ -40,9 +40,11 @@ export interface Capabilities {
   control: boolean
   hosts: boolean
   exec: boolean
+  // TODO(agent): audit-trail view (GET audit, permission docker:audit) — API only so far.
+  audit: boolean
 }
 
-export const NO_CAPABILITIES: Capabilities = { logs: false, control: false, hosts: false, exec: false }
+export const NO_CAPABILITIES: Capabilities = { logs: false, control: false, hosts: false, exec: false, audit: false }
 
 // Thrown on HTTP 403 so views can show "missing permission" instead of a raw
 // backend detail string.

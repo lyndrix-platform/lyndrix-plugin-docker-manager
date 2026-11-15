@@ -23,6 +23,7 @@ LOGS = "docker:logs"
 CONTROL = "docker:control"
 HOSTS = "docker:hosts"
 EXEC = "docker:exec"
+AUDIT = "docker:audit"
 
 # Container logs and anything else that exposes env/inspect details.
 PERM_LOGS = f"{_PREFIX}:{LOGS}"
@@ -32,6 +33,8 @@ PERM_CONTROL = f"{_PREFIX}:{CONTROL}"
 PERM_HOSTS = f"{_PREFIX}:{HOSTS}"
 # In-container code execution (shell snapshot).
 PERM_EXEC = f"{_PREFIX}:{EXEC}"
+# Read the audit trail (who started/stopped/exec'd/read logs).
+PERM_AUDIT = f"{_PREFIX}:{AUDIT}"
 
 # Capability name (as served by GET /capabilities) → permission id.
 CAPABILITIES = {
@@ -39,4 +42,5 @@ CAPABILITIES = {
     "control": PERM_CONTROL,
     "hosts": PERM_HOSTS,
     "exec": PERM_EXEC,
+    "audit": PERM_AUDIT,
 }

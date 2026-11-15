@@ -23,6 +23,7 @@ EXPECTED = {
     ("POST", "/containers/action"): f"{P}:docker:control",
     ("GET", "/containers/{host_id}/{container_id}/logs"): f"{P}:docker:logs",
     ("POST", "/containers/{host_id}/{container_id}/shell"): f"{P}:docker:exec",
+    ("GET", "/audit"): f"{P}:docker:audit",
 }
 
 
@@ -86,6 +87,7 @@ _SENSITIVE = [
     ("post", "/hosts/sync", {"hosts": []}),
     ("post", "/hosts/set", {"hosts": []}),
     ("delete", "/hosts/1", None),
+    ("get", "/audit", None),
 ]
 
 
@@ -99,7 +101,7 @@ def test_baseline_user_can_look_but_not_touch(monkeypatch, granted):
     assert client.get("/hosts").status_code == 200
     assert client.get("/containers").status_code == 200
     assert client.get("/capabilities").json() == {
-        "logs": False, "control": False, "hosts": False, "exec": False}
+        "logs": False, "control": False, "hosts": False, "exec": False, "audit": False}
     service.calls.clear()
     for method, path, body in _SENSITIVE:
         response = client.request(method, path, json=body)
@@ -129,22 +131,23 @@ def test_operator_role_gets_logs_and_control_only(monkeypatch):
     assert roles["admin"].auto_map_groups == ["INT_ADMIN"]
     assert roles["operator"].auto_map_groups == [] and roles["viewer"].auto_map_groups == []
     assert set(roles["viewer"].permissions) == {f"{P}:api:read"}
-    assert {f"{P}:docker:hosts", f"{P}:docker:exec"}.isdisjoint(roles["operator"].permissions)
+    assert {f"{P}:docker:hosts", f"{P}:docker:exec", f"{P}:docker:audit"}.isdisjoint(roles["operator"].permissions)
     assert {p.id for p in entrypoint.manifest.custom_permissions} == {
-        "docker:logs", "docker:control", "docker:hosts", "docker:exec"}
+        "docker:logs", "docker:control", "docker:hosts", "docker:exec", "docker:audit"}
 
     client, _ = _client(monkeypatch, roles["operator"].permissions)
     assert client.get("/capabilities").json() == {
-        "logs": True, "control": True, "hosts": False, "exec": False}
+        "logs": True, "control": True, "hosts": False, "exec": False, "audit": False}
     assert client.get("/containers/1/abc/logs").status_code == 200
     assert client.post("/containers/action", json={
         "host_id": 1, "container_id": "abc", "action": "stop"}).status_code == 200
     assert client.post("/containers/1/abc/shell").status_code == 403
     assert client.delete("/hosts/1").status_code == 403
+    assert client.get("/audit").status_code == 403
 
     admin, _ = _client(monkeypatch, roles["admin"].permissions)
     assert admin.get("/capabilities").json() == {
-        "logs": True, "control": True, "hosts": True, "exec": True}
+        "logs": True, "control": True, "hosts": True, "exec": True, "audit": True}
 
 
 def test_container_rows_expose_status_fields_only():

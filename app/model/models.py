@@ -54,3 +54,31 @@ class DockerHostRecord(_Base):
     check_error = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=func.now())
     updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
+
+
+class DockerAuditRecord(_Base):
+    """Append-only trail of what was done through this plugin, and by whom.
+
+    Rows are only ever inserted; the single exception is the retention prune
+    (``app/logic/audit.py``). Host and container are stored by value — the
+    trail must still read correctly after the host row is gone.
+    """
+
+    __tablename__ = "docker_manager_audit"
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # UTC, naive (like the other timestamps of this plugin).
+    at = Column(DateTime, nullable=False, index=True)
+    # Username of the caller; "system" for bus/internal callers.
+    actor = Column(String(255), nullable=False, index=True)
+    # start | stop | restart | logs | exec | host_upsert | host_delete | hosts_replace | hosts_sync
+    action = Column(String(32), nullable=False)
+    host_id = Column(Integer, nullable=True)
+    host_name = Column(String(255), nullable=True)
+    container = Column(String(255), nullable=True)
+    # ok | error
+    result = Column(String(16), nullable=False)
+    detail = Column(String(500), nullable=True)
+    # Core instance that executed the action (cluster mode).
+    instance = Column(String(128), nullable=True)
