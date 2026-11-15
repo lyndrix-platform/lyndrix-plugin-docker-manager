@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+Proposed version: **1.3.0** (security audit 2026-11; the manifest version is not bumped yet). Minimum core unchanged.
+React bundle rebuild needed (permission-aware controls, TLS badge and fields, `audit` capability flag).
+**Before the rollout:** users outside INT_ADMIN lose log, control and host-registry access until an administrator
+assigns the Docker Manager Operator/Administrator role (or the single permissions). A scoped user API key that calls
+`/hosts/sync` needs `docker:hosts`; the system API key is unaffected.
+
+### Security
+- Sensitive routes require custom permissions that the core's baseline `api:read`/`api:write` grant does not satisfy:
+  `docker:logs` (container logs), `docker:control` (start/stop/restart), `docker:hosts` (host registry) next to the
+  existing `docker:exec` (shell). Roles: admin = all, operator = logs + control, viewer = read. New
+  `GET /capabilities` tells a UI what the caller may do (DM-01).
+- Per-host TLS: new nullable columns `tls_verify`, `tls_ca_path`, `tls_client_auth` (idempotent ALTER under the
+  bootstrap lock). A client certificate and key are accepted write-only on `POST /hosts` and stored in Vault. Every
+  host reports `security{encrypted, server_verified, client_auth}`, `insecure` and `security_warning`; existing rows
+  stay plain http and are flagged (DM-02).
+- Viewer-level responses no longer contain internal host details (target URL, resolver and TLS details, CA path).
+- Docker targets are validated robustly (numeric IPv4 notations, IPv6 forms that embed IPv4, metadata ranges, resolved
+  addresses), every request connects to the checked IP (no DNS-rebinding window), redirects are never followed, and
+  container references follow Docker's grammar (DM-04).
+- Audit trail: new append-only table `docker_manager_audit` (created idempotently under the bootstrap lock) records
+  container start/stop/restart, log reads, shell exec and user-driven host changes. `GET /audit` (keyset paging,
+  filters `host_id`/`action`/`actor`) requires the new `docker:audit` permission (admin role). The bus event
+  `docker_manager:container:action` carries `actor`. New setting `audit_retention_days` (default 90, 0 = keep), pruned
+  hourly by the prober-lease holder (DM-06).
+- The NiceGUI `/docker` page requires `docker:exec` (DM-07).
+
+### Fixed
+- The inventory sync no longer resets a manually configured host to `http:2375`: it updates address and CI id of `iac`
+  rows only, `port`/`scheme` on `POST /hosts/sync` are optional, and unchanged hosts cause no write and no cluster
+  event. Sync stats gain `unchanged`; `updated` counts real changes (DM-03).
+- The prober uses its own 4-worker pool with an 8 s limit per host ("Probe timed out") and bounded DNS lookups, so
+  unreachable hosts no longer occupy the thread pool every plugin shares (DM-05).
+- `health()` no longer runs DDL; it reports degraded `schema_not_ready` until the bootstrap finished. A host payload
+  (API, bus, `/hosts/set`) with an unknown id gets a fresh id instead of recreating a deleted host (DM-08).
+
 ## [1.2.0] - 2026-10-15
 ### Changed
 - **Hosts live in the shared database.** New table `docker_manager_hosts`
