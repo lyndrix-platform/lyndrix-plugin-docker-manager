@@ -5,8 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-Proposed version: **1.3.0** (security audit 2026-11; the manifest version is not bumped yet). Minimum core unchanged.
+## [1.3.0] - 2026-11-15
+Security audit 2026-11. Minimum core unchanged.
 React bundle rebuild needed (permission-aware controls, TLS badge and fields, `audit` capability flag).
 **Before the rollout:** users outside INT_ADMIN lose log, control and host-registry access until an administrator
 assigns the Docker Manager Operator/Administrator role (or the single permissions). A scoped user API key that calls
