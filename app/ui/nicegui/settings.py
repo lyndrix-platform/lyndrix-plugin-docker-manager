@@ -1,7 +1,7 @@
 """Settings UI for Docker host configuration."""
 from __future__ import annotations
 
-from nicegui import ui
+from nicegui import run, ui
 
 from ...logic.service import DockerManagerService
 
@@ -70,7 +70,7 @@ def render_settings_ui(ctx, service: DockerManagerService):
                     scheme_input.value = selected.get("scheme", "http")
                     btn_delete.set_visibility(True)
 
-                def _save_host():
+                async def _save_host():
                     try:
                         payload = {
                             "id": current_host["id"],
@@ -81,18 +81,24 @@ def render_settings_ui(ctx, service: DockerManagerService):
                         }
                         if payload["id"] is None:
                             payload.pop("id")
-                        service.upsert_host(payload)
+                        # Blocking DB write — keep it off the event loop.
+                        await run.io_bound(service.upsert_host, payload)
                         _refresh_table()
                         _clear_form()
                         ui.notify("Host saved.", type="positive")
                     except Exception as exc:
                         ui.notify(f"Failed to save host: {exc}", type="negative")
 
-                def _delete_host():
+                async def _delete_host():
                     host_id = current_host.get("id")
                     if host_id is None:
                         return
-                    if service.delete_host(int(host_id)):
+                    try:
+                        removed = await run.io_bound(service.delete_host, int(host_id))
+                    except Exception as exc:
+                        ui.notify(f"Failed to remove host: {exc}", type="negative")
+                        return
+                    if removed:
                         _refresh_table()
                         _clear_form()
                         ui.notify("Host removed.", type="info")

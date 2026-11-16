@@ -4,8 +4,8 @@ import React, { useState, useEffect, useCallback } from 'react'
 // instance + active language. Strings come from locales/docker.<locale>.json,
 // auto-registered by core and served via the catalog (namespace "docker").
 import { useTranslation } from 'react-i18next'
-import { pluginApi, dockerManagerApi } from './lib/api'
-import type { DockerHost } from './lib/api'
+import { pluginApi, dockerManagerApi, ForbiddenError, NO_CAPABILITIES } from './lib/api'
+import type { Capabilities, DockerHost } from './lib/api'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -57,6 +57,18 @@ function stateLabel(state: string | null): string {
   return state.charAt(0).toUpperCase() + state.slice(1)
 }
 
+// Capabilities of the signed-in user; nothing privileged is rendered until the
+// lookup answered (fail closed).
+function useCapabilities(): Capabilities {
+  const [caps, setCaps] = useState<Capabilities>(NO_CAPABILITIES)
+  useEffect(() => {
+    let alive = true
+    void dockerManagerApi.getCapabilities().then((c) => { if (alive) setCaps(c) })
+    return () => { alive = false }
+  }, [])
+  return caps
+}
+
 // ─── Shared sub-components ────────────────────────────────────────────────────
 
 // size accepts the `--lx-icon-*` scale (xs/sm/md/lg) as a CSS var string, or a
@@ -70,6 +82,29 @@ function StateBadge({ state }: { state: string | null }) {
     <span className={`lx-badge ${stateBadgeClass(state)}`}>
       <span className="lx-dot" />
       {stateLabel(state)}
+    </span>
+  )
+}
+
+// Warning for hosts whose proxy connection is not protected. Plain http is the
+// default for existing hosts, so this is what tells an operator about it.
+function SecurityBadge({ host }: { host: DockerHost }) {
+  const { t } = useTranslation('docker')
+  if (!host.insecure) return null
+  const unverified = host.security_warning === 'tls_unverified'
+  const label = unverified
+    ? t('security.tls_unverified', { defaultValue: 'TLS not verified' })
+    : t('security.plaintext', { defaultValue: 'Unencrypted' })
+  const hint = unverified
+    ? t('security.tls_unverified_hint', {
+        defaultValue: 'The certificate of this Docker proxy is not verified; the connection can be intercepted.',
+      })
+    : t('security.plaintext_hint', {
+        defaultValue: 'Unencrypted, unauthenticated connection: anyone who can reach this port controls the Docker host.',
+      })
+  return (
+    <span className="lx-badge lx-badge--paused" title={hint}>
+      <MatIcon name="lock_open" size="var(--lx-icon-xs)" />{label}
     </span>
   )
 }
@@ -118,10 +153,13 @@ function DMStyles() {
 function ContainerRow({
   container,
   hostId,
+  canControl,
   onAction,
 }: {
   container: Container
   hostId: number
+  // false → the user lacks docker:control; the row is status-only.
+  canControl: boolean
   onAction: (hostId: number, containerId: string, action: ContainerAction) => Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
@@ -154,7 +192,7 @@ function ContainerRow({
       </div>
       <div className="dm-row-actions">
         <StateBadge state={container.state} />
-        {isRunning ? (
+        {!canControl ? null : isRunning ? (
           <>
             <button className="lx-btn lx-btn--secondary lx-btn--sm" disabled={busy} onClick={() => void act('restart')}>
               <MatIcon name="restart_alt" size="var(--lx-icon-sm)" />Restart
@@ -267,6 +305,7 @@ function HostTile({ entry, onClick }: { entry: HostEntry; onClick: () => void })
             <span className="lx-dot" />{runningCount}/{containers.length} aktiv
           </span>
         )}
+        <SecurityBadge host={host} />
         <span className="material-icons" style={{ fontSize: 'var(--lx-icon-xs)', color: 'var(--lx-text-muted)', opacity: 0.4 }}>arrow_forward</span>
       </div>
     </button>
@@ -299,6 +338,7 @@ function ContainerView() {
   const [loading, setLoading] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [selectedEntry, setSelectedEntry] = useState<HostEntry | null>(null)
+  const caps = useCapabilities()
 
   const fetchContainers = useCallback(async () => {
     setLoading(true)
@@ -327,7 +367,14 @@ function ContainerView() {
       await pluginApi.post('containers/action', { host_id: hostId, container_id: containerId, action })
       await fetchContainers()
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : `Aktion '${action}' fehlgeschlagen`)
+      if (err instanceof ForbiddenError) {
+        // Permission revoked since the capabilities were loaded.
+        setActionError(t('error.forbidden_control', {
+          defaultValue: 'Missing permission: container control (docker:control).',
+        }))
+      } else {
+        setActionError(err instanceof Error ? err.message : `Aktion '${action}' fehlgeschlagen`)
+      }
     }
   }
 
@@ -356,9 +403,11 @@ function ContainerView() {
           <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={() => void fetchContainers()} disabled={loading}>
             <MatIcon name="refresh" size="var(--lx-icon-sm)" />{loading ? 'Lade…' : 'Aktualisieren'}
           </button>
-          <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={goSettings}>
-            <MatIcon name="settings" size="var(--lx-icon-sm)" />Settings
-          </button>
+          {caps.hosts && (
+            <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={goSettings}>
+              <MatIcon name="settings" size="var(--lx-icon-sm)" />Settings
+            </button>
+          )}
         </div>
       </div>
 
@@ -409,6 +458,7 @@ function ContainerView() {
               key={c.id || c.name}
               container={c}
               hostId={selectedEntry.host.id}
+              canControl={caps.control}
               onAction={handleAction}
             />
           ))}
@@ -420,7 +470,7 @@ function ContainerView() {
 
 // ─── Settings view ────────────────────────────────────────────────────────────
 
-const EMPTY_FORM = { name: '', ip: '', port: 2375, scheme: 'http' }
+const EMPTY_FORM = { name: '', ip: '', port: 2375, scheme: 'http', tls_verify: true, tls_ca_path: '' }
 
 function ErrorBox({ msg }: { msg: string }) {
   return (
@@ -451,6 +501,11 @@ function CardHeader({ children }: { children: React.ReactNode }) {
 }
 
 function SettingsView() {
+  const { t } = useTranslation('docker')
+  const caps = useCapabilities()
+  const forbiddenHosts = t('error.forbidden_hosts', {
+    defaultValue: 'Missing permission: host registry (docker:hosts).',
+  })
   const [hosts, setHosts] = useState<DockerHost[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -477,7 +532,10 @@ function SettingsView() {
 
   function startEdit(host: DockerHost) {
     setEditId(host.id)
-    setForm({ name: host.name, ip: host.ip, port: host.port, scheme: host.scheme })
+    setForm({
+      name: host.name, ip: host.ip, port: host.port, scheme: host.scheme,
+      tls_verify: host.tls_verify ?? true, tls_ca_path: host.tls_ca_path ?? '',
+    })
     setNotice(null)
   }
 
@@ -492,13 +550,16 @@ function SettingsView() {
     setError(null)
     setNotice(null)
     try {
-      const payload = editId !== null ? { ...form, id: editId } : form
+      // An empty CA path clears the setting (system CA store).
+      const body = { ...form, tls_ca_path: form.tls_ca_path.trim() || null }
+      const payload = editId !== null ? { ...body, id: editId } : body
       const res = await dockerManagerApi.upsertHost(payload)
       setHosts(res.hosts)
       cancelEdit()
       setNotice('Host gespeichert.')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Speichern fehlgeschlagen')
+      setError(err instanceof ForbiddenError ? forbiddenHosts
+        : err instanceof Error ? err.message : 'Speichern fehlgeschlagen')
     } finally {
       setBusy(false)
     }
@@ -514,7 +575,8 @@ function SettingsView() {
       if (editId === id) cancelEdit()
       setNotice('Host entfernt.')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Löschen fehlgeschlagen')
+      setError(err instanceof ForbiddenError ? forbiddenHosts
+        : err instanceof Error ? err.message : 'Löschen fehlgeschlagen')
     } finally {
       setBusy(false)
     }
@@ -583,14 +645,14 @@ function SettingsView() {
             return (
               <div
                 key={host.id}
-                onClick={() => startEdit(host)}
+                onClick={() => { if (caps.hosts) startEdit(host) }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   padding: '12px 16px',
                   borderBottom: '1px solid var(--lx-border-soft)',
-                  cursor: 'pointer',
+                  cursor: caps.hosts ? 'pointer' : 'default',
                   background: active ? 'color-mix(in srgb, var(--lx-accent) 8%, transparent)' : 'transparent',
                   borderLeft: active ? '2px solid var(--lx-accent)' : '2px solid transparent',
                   transition: 'background var(--lx-transition-fast) var(--lx-ease)',
@@ -603,21 +665,35 @@ function SettingsView() {
                   <div className="lx-mono" style={{ fontSize: '0.6875rem', color: 'var(--lx-text-muted)', marginTop: 2 }}>
                     {host.scheme}://{host.ip}:{host.port}
                   </div>
+                  <div style={{ marginTop: 4 }}><SecurityBadge host={host} /></div>
                 </div>
-                <button
-                  className="lx-icon-btn lx-icon-btn--danger"
-                  onClick={(e) => { e.stopPropagation(); void deleteHost(host.id) }}
-                  disabled={busy}
-                  title="Löschen"
-                >
-                  <MatIcon name="delete_outline" size="var(--lx-icon-md)" />
-                </button>
+                {caps.hosts && (
+                  <button
+                    className="lx-icon-btn lx-icon-btn--danger"
+                    onClick={(e) => { e.stopPropagation(); void deleteHost(host.id) }}
+                    disabled={busy}
+                    title="Löschen"
+                  >
+                    <MatIcon name="delete_outline" size="var(--lx-icon-md)" />
+                  </button>
+                )}
               </div>
             )
           })}
         </div>
 
-        {/* Add / edit form */}
+        {/* Add / edit form — only with docker:hosts; readers get the list above */}
+        {!caps.hosts && (
+          <div className="lx-card dm-host-form">
+            <CardHeader>{t('hosts.read_only_title', { defaultValue: 'Read-only' })}</CardHeader>
+            <div style={{ padding: 16, fontSize: '0.8125rem', color: 'var(--lx-text-muted)' }}>
+              {t('hosts.read_only_hint', {
+                defaultValue: 'Changing Docker hosts requires the permission "Docker Host Registry" (docker:hosts). Ask an administrator for the Docker Manager Administrator role.',
+              })}
+            </div>
+          </div>
+        )}
+        {caps.hosts && (
         <div className="lx-card dm-host-form">
           <CardHeader>{isEditing ? 'Host bearbeiten' : 'Host hinzufügen'}</CardHeader>
 
@@ -665,6 +741,32 @@ function SettingsView() {
               </div>
             </div>
 
+            {form.scheme === 'https' && (
+              <>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8125rem', color: 'var(--lx-text)' }}>
+                  <input
+                    type="checkbox"
+                    checked={form.tls_verify}
+                    onChange={(e) => setForm((f) => ({ ...f, tls_verify: e.target.checked }))}
+                  />
+                  {t('hosts.tls_verify', { defaultValue: 'Verify the server certificate' })}
+                </label>
+                <div>
+                  <label className="lx-label">
+                    {t('hosts.tls_ca_path', { defaultValue: 'CA bundle path (optional)' })}
+                  </label>
+                  <input
+                    className="lx-input"
+                    value={form.tls_ca_path}
+                    onChange={(e) => setForm((f) => ({ ...f, tls_ca_path: e.target.value }))}
+                    placeholder="/data/security/docker-ca.pem"
+                  />
+                </div>
+                {/* TODO(agent): client certificate upload — today only via POST /hosts
+                    (tls_client_cert_pem / tls_client_key_pem, stored in Vault). */}
+              </>
+            )}
+
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
               {isEditing && (
                 <button className="lx-btn lx-btn--secondary lx-btn--sm" onClick={cancelEdit} disabled={busy}>
@@ -681,6 +783,7 @@ function SettingsView() {
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   )

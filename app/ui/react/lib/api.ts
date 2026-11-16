@@ -11,6 +11,48 @@ export interface DockerHost {
   ip: string
   port: number
   scheme: string
+  // TLS settings (scheme "https"); absent on backends older than the TLS support.
+  tls_verify?: boolean
+  tls_ca_path?: string | null
+  // true when a client certificate is stored in Vault (the material is never served).
+  tls_client_auth?: boolean
+  // true when traffic to this proxy can be read or redirected on the path.
+  insecure?: boolean
+  security_warning?: 'unencrypted_unauthenticated' | 'tls_unverified' | 'tls_no_client_auth' | null
+}
+
+// What the host form may send; omitted TLS fields keep the stored setting.
+export interface DockerHostInput {
+  id?: number
+  name: string
+  ip: string
+  port: number
+  scheme: string
+  tls_verify?: boolean
+  tls_ca_path?: string | null
+}
+
+// What the signed-in user may do beyond reading (GET /capabilities). Each flag
+// maps to one docker:* permission; the backend enforces them, the UI only
+// uses them to hide controls that would answer 403.
+export interface Capabilities {
+  logs: boolean
+  control: boolean
+  hosts: boolean
+  exec: boolean
+  // TODO(agent): audit-trail view (GET audit, permission docker:audit) — API only so far.
+  audit: boolean
+}
+
+export const NO_CAPABILITIES: Capabilities = { logs: false, control: false, hosts: false, exec: false, audit: false }
+
+// Thrown on HTTP 403 so views can show "missing permission" instead of a raw
+// backend detail string.
+export class ForbiddenError extends Error {
+  constructor(detail?: string) {
+    super(detail ?? 'Fehlende Berechtigung')
+    this.name = 'ForbiddenError'
+  }
 }
 
 // In-SPA redirect that the shell's BrowserRouter picks up — NOT a full reload.
@@ -50,6 +92,14 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new Error('Nicht autorisiert')
   }
 
+  if (res.status === 403) {
+    let detail: string | undefined
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail
+    } catch { /* ignore */ }
+    throw new ForbiddenError(detail)
+  }
+
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -79,9 +129,19 @@ export const pluginApi = {
 // Hosts are served by the plugin's single auth'd router at /api/plugins/<id>/,
 // the same path as containers — one client, one surface.
 export const dockerManagerApi = {
+  // Fails closed: when the lookup itself fails the UI shows no privileged
+  // controls (the backend would reject them anyway).
+  getCapabilities: async (): Promise<Capabilities> => {
+    try {
+      return { ...NO_CAPABILITIES, ...(await pluginApi.get<Partial<Capabilities>>('capabilities')) }
+    } catch {
+      return NO_CAPABILITIES
+    }
+  },
+
   getHosts: () => pluginApi.get<{ hosts: DockerHost[] }>('hosts'),
 
-  upsertHost: (host: Omit<DockerHost, 'id'> & { id?: number }) =>
+  upsertHost: (host: DockerHostInput) =>
     pluginApi.post<{ host: DockerHost; hosts: DockerHost[] }>('hosts', host),
 
   deleteHost: (id: number) =>
