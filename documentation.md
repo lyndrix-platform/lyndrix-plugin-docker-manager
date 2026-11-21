@@ -12,24 +12,24 @@ Live updates run through the Lyndrix sockets layer (SSE). The plugin requires ma
 
 ```
 lyndrix-plugin-docker-manager/
-├── entrypoint.py              # Manifest + Lifecycle-Hooks
+├── entrypoint.py              # Manifest + lifecycle hooks
 ├── app/
-│   ├── permissions.py         # Berechtigungs-IDs (docker:logs/control/hosts/exec/audit)
-│   ├── api.py                 # FastAPI-Router (Hosts + Container-Aktionen)
+│   ├── permissions.py         # Permission IDs (docker:logs/control/hosts/exec/audit)
+│   ├── api.py                 # FastAPI router (hosts + container actions)
 │   ├── model/
-│   │   ├── models.py          # Tabellen docker_manager_hosts, docker_manager_audit
-│   │   └── database.py        # Cluster-sichere DB-Helfer (Bootstrap-Lock, READ COMMITTED, Retry)
+│   │   ├── models.py          # Tables docker_manager_hosts, docker_manager_audit
+│   │   └── database.py        # Cluster-safe DB helpers (bootstrap lock, READ COMMITTED, retry)
 │   ├── logic/
-│   │   ├── targets.py         # Ziel-Validierung (SSRF, IP-Pinning)
-│   │   ├── tls.py             # Pro-Host-TLS, Client-Zertifikate in Vault
-│   │   ├── audit.py           # Audit-Trail (docker_manager_audit)
-│   │   └── service.py         # DockerManagerService: Host-Persistenz, Docker-Proxy, SSRF-Validierung
+│   │   ├── targets.py         # Target validation (SSRF, IP pinning)
+│   │   ├── tls.py             # Per-host TLS, client certificates in Vault
+│   │   ├── audit.py           # Audit trail (docker_manager_audit)
+│   │   └── service.py         # DockerManagerService: host persistence, Docker proxy, SSRF validation
 │   └── ui/
 │       ├── nicegui/
-│       │   ├── overview.py    # Container-Übersicht + Laufzeitsteuerung
-│       │   ├── settings.py    # Host-Verwaltung im Plugin-Manager
-│       │   └── widget.py      # Kompaktes Dashboard-Widget
-│       └── react/             # React-Frontend (kanonisches Migrationsziel)
+│       │   ├── overview.py    # Container overview + runtime control
+│       │   ├── settings.py    # Host management in the plugin manager
+│       │   └── widget.py      # Compact dashboard widget
+│       └── react/             # React frontend (canonical migration target)
 ```
 
 **`DockerManagerService`** manages the Docker hosts, validates all inputs against SSRF attacks and forwards HTTP requests to the Docker proxy.
