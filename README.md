@@ -15,6 +15,18 @@ mediated by core auth/permissions.
   Vault namespace.
 - **Dashboard widget + settings UI** — a compact status widget and a settings page.
 - **REST API** — container operations exposed under `/api/plugins/lyndrix.plugin.docker/`.
+- **Per-host TLS** — `https` with server verification, optional CA bundle and client certificate
+  (stored write-only in Vault); insecure hosts are flagged.
+- **Audit trail** — append-only log of container actions, log reads, shell exec and host changes
+  (`GET /audit`, retention setting `audit_retention_days`, default 90).
+
+## Permissions
+
+Sensitive functions need dedicated permissions that the core's baseline `api:read`/`api:write`
+grant does not satisfy: `docker:logs`, `docker:control`, `docker:hosts`, `docker:exec`,
+`docker:audit`. Roles: **admin** (all; auto-mapped to `INT_ADMIN`), **operator** (logs + control)
+and **viewer** (read only); operator and viewer are assigned manually by an administrator.
+See [`documentation.md`](documentation.md) and the [Changelog](CHANGELOG.md) (1.3.0 upgrade note).
 
 ## Installation
 

@@ -1,141 +1,185 @@
-# Docker Manager — Dokumentation
+# Docker Manager — Documentation
 
-## Übersicht
+## Overview
 
-Der Docker Manager ermöglicht die zentrale Überwachung und Steuerung von Docker-Hosts über eine Remote-Proxy-HTTP-API (kein direkter Socket-Zugriff). Für jeden registrierten Host können Container in Echtzeit angezeigt und Aktionen wie Start, Stop, Restart, Log-Abruf und Shell-Zugriff ausgeführt werden.
+The Docker Manager enables central monitoring and control of Docker hosts via a remote proxy HTTP API (no direct socket access). For every registered host, containers can be displayed in real time and actions such as start, stop, restart, log retrieval and shell access can be executed.
 
-Live-Updates laufen über den Lyndrix-Sockets-Layer (SSE). Das Plugin benötigt vor der ersten Nutzung eine manuelle Host-Konfiguration (`auto_enable_on_install=False`).
+Live updates run through the Lyndrix sockets layer (SSE). The plugin requires manual host configuration before first use (`auto_enable_on_install=False`).
 
 ---
 
-## Architektur
+## Architecture
 
 ```
 lyndrix-plugin-docker-manager/
-├── entrypoint.py              # Manifest + Lifecycle-Hooks
+├── entrypoint.py              # Manifest + lifecycle hooks
 ├── app/
-│   ├── api.py                 # FastAPI-Router (Hosts + Container-Aktionen)
+│   ├── permissions.py         # Permission IDs (docker:logs/control/hosts/exec/audit)
+│   ├── api.py                 # FastAPI router (hosts + container actions)
 │   ├── model/
-│   │   ├── models.py          # Tabelle docker_manager_hosts
-│   │   └── database.py        # Cluster-sichere DB-Helfer (Bootstrap-Lock, READ COMMITTED, Retry)
+│   │   ├── models.py          # Tables docker_manager_hosts, docker_manager_audit
+│   │   └── database.py        # Cluster-safe DB helpers (bootstrap lock, READ COMMITTED, retry)
 │   ├── logic/
-│   │   └── service.py         # DockerManagerService: Host-Persistenz, Docker-Proxy, SSRF-Validierung
+│   │   ├── targets.py         # Target validation (SSRF, IP pinning)
+│   │   ├── tls.py             # Per-host TLS, client certificates in Vault
+│   │   ├── audit.py           # Audit trail (docker_manager_audit)
+│   │   └── service.py         # DockerManagerService: host persistence, Docker proxy, SSRF validation
 │   └── ui/
 │       ├── nicegui/
-│       │   ├── overview.py    # Container-Übersicht + Laufzeitsteuerung
-│       │   ├── settings.py    # Host-Verwaltung im Plugin-Manager
-│       │   └── widget.py      # Kompaktes Dashboard-Widget
-│       └── react/             # React-Frontend (kanonisches Migrationsziel)
+│       │   ├── overview.py    # Container overview + runtime control
+│       │   ├── settings.py    # Host management in the plugin manager
+│       │   └── widget.py      # Compact dashboard widget
+│       └── react/             # React frontend (canonical migration target)
 ```
 
-**`DockerManagerService`** verwaltet die Docker-Hosts, validiert alle Eingaben gegen SSRF-Angriffe und leitet HTTP-Anfragen an den Docker-Proxy weiter.
+**`DockerManagerService`** manages the Docker hosts, validates all inputs against SSRF attacks and forwards HTTP requests to the Docker proxy.
 
-### Host-Speicherung und Cluster-Betrieb (ab 1.2.0)
+### Host Storage and Cluster Operation (from 1.2.0)
 
-- Die Hosts liegen in der gemeinsamen MariaDB-Tabelle `docker_manager_hosts` (Autoincrement-ID, eindeutiger Name, Adresse, Port, Schema, Labels, Quelle `manual`/`iac`, `ci_id`, Prüfergebnis). Jede Core-Instanz hinter dem Load-Balancer sieht dieselben Hosts und IDs; die Liste im Arbeitsspeicher ist nur ein Cache (nach eigenen Änderungen, beim Cluster-Event und spätestens nach 30 s neu gelesen).
-- Die Tabelle wird idempotent unter dem Bootstrap-Lock `lyndrix_bootstrap` angelegt (beim Setup, wenn die DB schon verbunden ist, und bei `db:connected`).
-- Schreibzugriffe laufen zeilenweise in kurzen READ-COMMITTED-Transaktionen und werden bei MariaDB-Fehler 1020/1205/1213 (Snapshot-Isolation, Lock-Timeout, Deadlock) sowie bei einem verlorenen Insert-Rennen auf denselben Namen wiederholt.
-- Nach jeder Änderung sendet das Plugin `docker_manager:hosts_updated` mit `cluster=True`; die anderen Instanzen laden ihren Cache neu, wenn die Kopie `_origin` trägt.
-- **Migration:** Die alte Vault-Liste `configured_hosts` wird einmalig importiert. IDs bleiben erhalten, sofern frei (sonst neue ID, wird geloggt); bereits vorhandene Namen gewinnen. Der Vault-Marker `configured_hosts_migrated_at` verhindert einen erneuten Import (gelöschte Hosts kommen nicht zurück).
-- **Erreichbarkeit:** Genau eine Instanz prüft die Docker-Proxys im Hintergrund (Lease `docker_manager:prober`, Intervall `probe_interval_seconds`, Standard 60 s) und schreibt `reachable`, `checked_at` und `check_error` in die Tabelle. `health()` liest nur diese Werte (eine Abfrage) und meldet nicht erreichbare Proxys als `degraded`, nie als `error`.
+- The hosts are stored in the shared MariaDB table `docker_manager_hosts` (autoincrement ID, unique name, address, port, scheme, labels, source `manual`/`iac`, `ci_id`, check result). Every core instance behind the load balancer sees the same hosts and IDs; the in-memory list is only a cache (re-read after own changes, on the cluster event, and at the latest after 30 s).
+- The table is created idempotently under the bootstrap lock `lyndrix_bootstrap` (during setup, if the DB is already connected, and on `db:connected`).
+- Write accesses run row by row in short READ-COMMITTED transactions and are retried on MariaDB errors 1020/1205/1213 (snapshot isolation, lock timeout, deadlock) as well as on a lost insert race for the same name.
+- After every change, the plugin sends `docker_manager:hosts_updated` with `cluster=True`; the other instances reload their cache when the copy carries `_origin`.
+- **Migration:** The old Vault list `configured_hosts` is imported once. IDs are preserved if free (otherwise a new ID is assigned and logged); names that already exist win. The Vault marker `configured_hosts_migrated_at` prevents a repeated import (deleted hosts do not come back).
+- **Reachability:** Exactly one instance checks the Docker proxies in the background (lease `docker_manager:prober`, interval `probe_interval_seconds`, default 60 s) and writes `reachable`, `checked_at` and `check_error` to the table. `health()` only reads these values (one query) and reports unreachable proxies as `degraded`, never as `error`. The prober uses its own pool (4 workers, 8 s limit per host). `health()` runs no DDL and reports `degraded` (`schema_not_ready`) until the bootstrap has completed.
 
 ---
 
-## API-Referenz
+## API Reference
 
-Alle Routen sind unter `/api/plugins/lyndrix.plugin.docker/` erreichbar und erfordern eine gültige Authentifizierung.
+All routes are reachable under `/api/plugins/lyndrix.plugin.docker/` and require valid authentication. Since 1.3.0, the core's base permission `api:read`/`api:write` is **no longer** sufficient for sensitive routes; they require the dedicated permissions listed below (see [Permissions and roles](#permissions-and-roles)).
 
-| Methode | Pfad | Beschreibung |
+| Method | Path | Permission | Description |
+|---|---|---|---|
+| `GET` | `/capabilities` | `api:read` | What the caller is allowed to do (`logs`, `control`, `hosts`, `exec`, `audit` as booleans); the UI uses this to hide controls |
+| `GET` | `/hosts` | `api:read` | List of all hosts (without `labels`, `check_error`, `tls_ca_path`, as long as `docker:hosts` is missing) |
+| `POST` | `/hosts` | `docker:hosts` | Create a host or update it (by name/ID): `name`, `ip`, `port`, `scheme`, TLS fields |
+| `POST` | `/hosts/sync` | `docker:hosts` | Upsert hosts by name without removing others (IaC orchestrator, scripts); `port`/`scheme` optional; response with `unchanged` counter |
+| `POST` | `/hosts/set` | `docker:hosts` | Replace the complete host list |
+| `DELETE` | `/hosts/{host_id}` | `docker:hosts` | Remove a host |
+| `GET` | `/containers` | `api:read` | Containers of all hosts (`include_stopped`); without `docker:hosts` no internal host details |
+| `POST` | `/containers/action` | `docker:control` | Container action (`start` / `stop` / `restart`), body `host_id`, `container_id`, `action` |
+| `GET` | `/containers/{host_id}/{container_id}/logs` | `docker:logs` | Container logs (`tail`, default 200) |
+| `POST` | `/containers/{host_id}/{container_id}/shell` | `docker:exec` | Shell snapshot via Docker `exec` |
+| `GET` | `/audit` | `docker:audit` | Audit trail, newest first; keyset paging (`limit`, `before_id` = `next_before_id` of the previous page), filters `host_id`, `action`, `actor` |
+
+Container references are validated against the Docker grammar; the plugin never follows redirects.
+
+---
+
+## Permissions and Roles
+
+The core grants `plugin:<id>:api:read` to every logged-in user and `api:write` to every user in the group INT_USER. For this reason, all sensitive functions have their own permissions (prefix `plugin:lyndrix.plugin.docker:`), which are satisfied neither by the base permissions nor by the global `api:read`/`api:write`:
+
+| Permission | Protects |
+|---|---|
+| `docker:logs` | Container logs |
+| `docker:control` | Start / stop / restart |
+| `docker:hosts` | Host registry (create, change, delete, synchronize) |
+| `docker:exec` | Shell in containers; also the NiceGUI page `/docker` |
+| `docker:audit` | Read the audit trail |
+
+| Role | Rights | Assignment |
 |---|---|---|
-| `GET` | `/hosts` | Liste aller registrierten Docker-Hosts |
-| `POST` | `/hosts` | Neuen Host registrieren (`name`, `ip`, `port`, `scheme`) |
-| `PUT` | `/hosts/{id}` | Host aktualisieren |
-| `DELETE` | `/hosts/{id}` | Host entfernen |
-| `GET` | `/containers/{host_id}` | Container-Liste für einen Host |
-| `POST` | `/containers/{host_id}/{action}` | Container-Aktion (`start` / `stop` / `restart`) |
-| `GET` | `/logs/{host_id}/{container_id}` | Container-Logs abrufen |
-| `GET` | `/shell/{host_id}/{container_id}` | Shell-Zugriff via WebSocket |
+| `admin` (Docker Manager Administrator) | all five permissions plus `api:read`/`api:write` | automatically for the group `INT_ADMIN` |
+| `operator` (Docker Manager Operator) | read, logs, container control | not automatic; an administrator assigns it |
+| `viewer` (Docker Manager Viewer) | hosts and containers with status | not automatic |
+
+**Note on updating to 1.3.0:** Users outside `INT_ADMIN` lose log, control and host registry access until they are assigned the operator/administrator role (or the individual permissions). A restricted user API key that calls `/hosts/sync` needs `docker:hosts`; the system API key is not affected.
+
+### Audit Trail
+
+The append-only table `docker_manager_audit` (created idempotently under the bootstrap lock) records container start/stop/restart, log retrievals, shell exec and user-triggered host changes. The instance holding the prober lease deletes entries hourly after `audit_retention_days`. The bus event `docker_manager:container:action` additionally contains `actor`.
 
 ---
 
 ## Events
 
-| Richtung | Topic | Beschreibung |
+| Direction | Topic | Description |
 |---|---|---|
-| subscribe | `docker_manager:hosts:set` | Komplette Host-Liste setzen |
-| subscribe | `docker_manager:host:upsert` | Einzelnen Host anlegen oder aktualisieren |
-| subscribe | `docker_manager:host:delete` | Einzelnen Host entfernen |
-| subscribe | `docker_manager:hosts:get` | Aktuelle Host-Liste anfordern |
-| subscribe | `iac:inventory_updated` | Docker-Hosts aus dem IaC-Inventar übernehmen (Kopien mit `_origin` werden ignoriert) |
-| subscribe | `plugin:settings_changed` | Einstellungen neu lesen |
-| subscribe/emit | `docker_manager:hosts_updated` | Cluster-Event nach jeder Host-Änderung (`{"reason", "ids"}`, `cluster=True`) |
-| emit | `docker_manager:hosts:updated` | Host-Liste hat sich geändert (lokal, komplette Liste) |
-| emit | `docker_manager:hosts:state` | Aktueller Host-Status (Polling-Ergebnis) |
-| emit | `docker_manager:container:action` | Container-Aktion wurde ausgeführt |
+| subscribe | `docker_manager:hosts:set` | Set the complete host list |
+| subscribe | `docker_manager:host:upsert` | Create or update a single host |
+| subscribe | `docker_manager:host:delete` | Remove a single host |
+| subscribe | `docker_manager:hosts:get` | Request the current host list |
+| subscribe | `iac:inventory_updated` | Take over Docker hosts from the IaC inventory (copies with `_origin` are ignored) |
+| subscribe | `plugin:settings_changed` | Re-read settings |
+| subscribe/emit | `docker_manager:hosts_updated` | Cluster event after every host change (`{"reason", "ids"}`, `cluster=True`) |
+| emit | `docker_manager:hosts:updated` | Host list has changed (local, complete list) |
+| emit | `docker_manager:hosts:state` | Current host status (polling result) |
+| emit | `docker_manager:container:action` | Container action was executed (contains `actor`) |
 
 ---
 
-## Konfiguration & Einstellungen
+## Configuration & Settings
 
-Das Plugin besitzt keine externen Umgebungsvariablen. Die Host-Konfiguration erfolgt über die Plugin-Einstellungsseite, die REST-API oder automatisch aus dem IaC-Inventar.
+The plugin has no external environment variables. The host configuration is done via the plugin settings page, the REST API or automatically from the IaC inventory.
 
-| Einstellung | Standardwert | Beschreibung |
+| Setting | Default value | Description |
 |---|---|---|
-| `probe_interval_seconds` | `60` | Intervall der Erreichbarkeitsprüfung (Minimum 10 s) |
+| `probe_interval_seconds` | `60` | Interval of the reachability check (minimum 10 s) |
+| `audit_retention_days` | `90` | Retention of the audit trail in days (`0` = unlimited); cleanup hourly by the prober instance |
 
-**Wichtig:** `auto_enable_on_install=False` — das Plugin muss nach der Installation manuell aktiviert werden, da ohne mindestens einen konfigurierten Host keine sinnvolle Funktion möglich ist.
+**Important:** `auto_enable_on_install=False` — the plugin must be activated manually after installation, since no meaningful function is possible without at least one configured host.
 
-### Host-Felder
+### Host Fields
 
-| Feld | Typ | Standardwert | Beschreibung |
+| Field | Type | Default value | Description |
 |---|---|---|---|
-| `name` | string | — | Anzeigename des Hosts |
-| `ip` | string | — | IP-Adresse oder Hostname des Docker-Proxys |
-| `port` | integer | `2375` | TCP-Port des Docker-Proxys |
-| `scheme` | string | `http` | `http` oder `https` |
-| `source` | string | `manual` | `manual` oder `iac` (nur lesend in der UI) |
-| `ci_id` | string | — | Entity-Registry-UUID, falls bekannt |
-| `reachable` / `checked_at` / `check_error` | — | — | Letztes Ergebnis der Erreichbarkeitsprüfung (nur lesend) |
+| `name` | string | — | Display name of the host |
+| `ip` | string | — | IP address or hostname of the Docker proxy |
+| `port` | integer | `2375` | TCP port of the Docker proxy |
+| `scheme` | string | `http` | `http` or `https` |
+| `source` | string | `manual` | `manual` or `iac` (read-only in the UI) |
+| `ci_id` | string | — | Entity Registry UUID, if known |
+| `tls_verify` | boolean | — | Verify the server certificate (`https` only) |
+| `tls_ca_path` | string | — | CA bundle file on the core; `null` removes it |
+| `tls_client_cert_pem` / `tls_client_key_pem` | string | — | Client certificate and key (write-only, stored in Vault); the response only contains `tls_client_auth` |
+| `tls_client_auth` | boolean | — | `false` removes the stored client certificate |
+| `security` / `insecure` / `security_warning` | — | — | Read-only: `security{encrypted, server_verified, client_auth}`; existing hosts remain plaintext `http` and are marked |
+| `reachable` / `checked_at` / `check_error` | — | — | Last result of the reachability check (read-only) |
 
 ---
 
-## Sicherheitshinweise
+## Security Notes
 
-Die Methode `_validate_host_target` in `app/logic/service.py` schützt gegen SSRF-Angriffe (Server-Side Request Forgery). Folgende Adresstypen werden **abgelehnt**:
+The method `_validate_host_target` in `app/logic/service.py` protects against SSRF attacks (Server-Side Request Forgery). The following address types are **rejected**:
 
-- Link-local-Adressen (`169.254.0.0/16`, IPv6 link-local)
-- Cloud-Metadaten-Adressen
-- Multicast- und reservierte Adressbereiche
+- Link-local addresses (`169.254.0.0/16`, IPv6 link-local)
+- Cloud metadata addresses
+- Multicast and reserved address ranges
+- Numeric IPv4 notations and IPv6 forms that embed IPv4, as well as resolved addresses in these ranges
 
-Private (`10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`) und Loopback-Adressen (`127.0.0.1`) sind **erlaubt**, da Docker-Proxys typischerweise im lokalen Netz oder auf dem Host selbst betrieben werden.
+Every request connects to the checked IP (no DNS rebinding window); redirects are never followed. Since 1.3.0 the check lives in `app/logic/targets.py`, TLS in `app/logic/tls.py`, and the audit trail in `app/logic/audit.py`.
 
----
-
-## Internationaliserung
-
-Das Plugin registriert den i18n-Namespace `docker`. Übersetzungsdateien liegen unter `locales/docker.<locale>.json` und werden automatisch beim Laden in den Lyndrix-Katalog aufgenommen. Der React-Client lädt sie über den Standard-i18n-Endpunkt (`GET /api/i18n/{locale}?ns=docker`).
+Private (`10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`) and loopback addresses (`127.0.0.1`) are **allowed**, since Docker proxies are typically operated in the local network or on the host itself.
 
 ---
 
-## Entwicklung & Tests
+## Internationalization
+
+The plugin registers the i18n namespace `docker`. Translation files are located under `locales/docker.<locale>.json` and are automatically picked up by the Lyndrix catalog when loaded. The React client loads them via the standard i18n endpoint (`GET /api/i18n/{locale}?ns=docker`).
+
+---
+
+## Development & Testing
 
 ```bash
-# Aus dem Plugin-Verzeichnis (lyndrix-plugin-docker-manager/)
+# From the plugin directory (lyndrix-plugin-docker-manager/)
 pip install -r requirements-dev.txt
 
-# Tests ausführen
+# Run tests
 pytest
 
-# Typprüfung
+# Type checking
 mypy .
 
 # Linter
 ruff check .
 
-# Formatter prüfen
+# Check formatter
 black --check .
 ```
 
-Die Service-Schicht (`app/logic/service.py`) und das API-Modul (`app/api.py`) sind unabhängig von einem laufenden Lyndrix-Core testbar. Für Lifecycle-Hook-Tests kann `ModuleContext` gemockt werden.
+The service layer (`app/logic/service.py`) and the API module (`app/api.py`) are testable independently of a running Lyndrix core. For lifecycle hook tests, `ModuleContext` can be mocked.
 
-Die Cluster-Tests (`tests/test_cluster.py`) laufen gegen eine SQLite-In-Memory-Datenbank und brauchen den Core im Pfad (`core.services` wird in `tests/conftest.py` zuerst importiert) — am einfachsten im Container `lyndrix-core-dev` mit `PYTHONPATH=/app` und `LYNDRIX_CLUSTER_MODE=single`.
+The cluster tests (`tests/test_cluster.py`) run against an SQLite in-memory database and need the core on the path (`core.services` is imported first in `tests/conftest.py`) — simplest in the container `lyndrix-core-dev` with `PYTHONPATH=/app` and `LYNDRIX_CLUSTER_MODE=single`.
